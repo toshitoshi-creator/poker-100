@@ -30,17 +30,18 @@ export function useStore<T, S>(store: Store<T>, select: (s: T) => S): S {
   return useSyncExternalStore(store.subscribe, () => select(store.get()));
 }
 
-export type Phase = 'idle' | 'deal' | 'flop' | 'turn' | 'river' | 'showdown' | 'attack' | 'result';
+export type Phase = 'idle' | 'deal' | 'preflop' | 'flop' | 'turn' | 'river' | 'showdown' | 'result';
 
 /** What the screen currently shows. Driven by the Director; never read by game logic. */
 export interface PresentationState {
   phase: Phase;
   playerHp: number;
   opponentHp: number;
+  pot: number;
   survivors: number;
+  sayPlayer: string;
+  sayOpponent: string;
   /** Round id currently on screen (0 = none yet). */
   round: number;
   playing: boolean;
-  /** True once the round's result has been fully shown (or skipped). */
-  settled: boolean;
 }

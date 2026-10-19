@@ -1,9 +1,9 @@
-import { createGame, resolveRound, type GameState, type RoundResult } from '../logic/game';
+import { createGame, legalActions, playerAct, startHand, type GameState, type LegalAction, type PlayerAction } from '../logic/game';
 import type { Presenter } from '../presentation/director';
 
 /**
  * Owns the authoritative GameState. Every action is synchronous and resolves
- * logic first; the presenter only ever displays already-decided results, so
+ * logic first; the presenter only ever displays already-decided events, so
  * no animation (finished, skipped or interrupted) can affect the game state.
  */
 export class GameController {
@@ -26,33 +26,43 @@ export class GameController {
     this.presenter = presenter;
   }
 
-  /**
-   * Resolve the next round. If a presentation is running it is skipped first,
-   * so rapid taps simply fast-forward. The caller (UI) plays the new round
-   * once it has rendered it.
-   */
-  deal(): RoundResult | null {
-    if (this.presenter?.isPlaying()) this.presenter.skip();
-    if (this.state.status !== 'playing') return null;
-    this.state = resolveRound(this.state);
-    this.emit();
-    return this.state.lastRound;
+  legal(): LegalAction[] {
+    return legalActions(this.state);
+  }
+
+  /** Start the next hand. A running presentation is fast-forwarded first. */
+  deal(): boolean {
+    return this.step(startHand);
+  }
+
+  /** Player decision. Stale or illegal actions (e.g. from a double tap) are ignored. */
+  act(action: PlayerAction): boolean {
+    return this.step((s) => playerAct(s, action));
   }
 
   skip(): void {
     this.presenter?.skip();
   }
 
-  /** Re-run the last round's presentation. Game state is untouched. */
+  /** Re-run the last finished hand's presentation. Game state is untouched. */
   replay(): void {
-    const last = this.state.lastRound;
-    if (last) this.presenter?.play(last);
+    if (this.state.hand || this.state.lastLog.length === 0) return;
+    this.presenter?.play(this.state.lastLog, 0);
   }
 
   reset(seed: number): void {
     this.presenter?.reset();
     this.state = createGame(seed);
     this.emit();
+  }
+
+  private step(fn: (s: GameState) => GameState): boolean {
+    if (this.presenter?.isPlaying()) this.presenter.skip();
+    const next = fn(this.state);
+    if (next === this.state) return false;
+    this.state = next;
+    this.emit();
+    return true;
   }
 
   private emit() {

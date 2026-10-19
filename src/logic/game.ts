@@ -1,7 +1,8 @@
-import { calculateDamage, effectTier, type EffectTier } from './combat';
+import { decideFacing, decideOpen, type AiContext } from './ai';
+import { anteFor, effectTier, handBonus, type EffectTier } from './combat';
 import { dealHoldem, type HoldemDeal } from './dealer';
 import { compareHands, evaluateBest, type HandResult } from './handEvaluator';
-import { applyDamage, type Fighter, type HpChange } from './hp';
+import type { Fighter } from './hp';
 import { deriveSeed, mulberry32, randInt } from './rng';
 
 export const TOTAL_PLAYERS = 100;
@@ -10,28 +11,66 @@ export const OPPONENT_MAX_HP = 80;
 
 export type Side = 'player' | 'opponent';
 export type GameStatus = 'playing' | 'won' | 'lost';
+/** Betting happens twice: after the hole cards and after the flop. */
+export type Street = 'preflop' | 'flop';
+export type BetSize = 'half' | 'pot' | 'allin';
 
-export interface AttackResult {
-  attacker: Side;
-  target: Side;
-  damage: number;
-  hp: HpChange;
-}
+export type PlayerAction = { type: 'check' } | { type: 'bet'; size: BetSize } | { type: 'call' } | { type: 'fold' };
+export type LegalAction = PlayerAction & { amount: number };
 
-/** Everything that happened in one round, fixed before any animation starts. */
-export interface RoundResult {
+const other = (s: Side): Side => (s === 'player' ? 'opponent' : 'player');
+
+/** What happened, in order. The presentation replays these; logic never waits for it. */
+export type GameEvent =
+  | {
+      t: 'start';
+      round: number;
+      ante: number;
+      /** Fighters before the ante was posted. */
+      player: Fighter;
+      opponent: Fighter;
+      survivors: number;
+    }
+  | { t: 'check'; side: Side }
+  | { t: 'bet'; side: Side; amount: number; kind: 'bet' | 'call'; allIn: boolean }
+  | { t: 'fold'; side: Side }
+  | { t: 'street' }
+  | { t: 'runout'; from: 0 | 3 }
+  | { t: 'showdown' }
+  | { t: 'award'; result: RoundResult };
+
+export interface HandState {
   round: number;
-  /** Seed for this round; presentation may reuse it for cosmetic randomness. */
   seed: number;
   deal: HoldemDeal;
+  street: Street;
+  /** Chips each side has put in the pot this hand (ante included). */
+  committed: Record<Side, number>;
+  /** Amount the player must call; 0 means the player may check or bet. */
+  facing: number;
+  /** Increments per AI decision, so each one gets its own deterministic rng. */
+  decisions: number;
+  log: GameEvent[];
+}
+
+/** Everything about a finished hand, decided before any animation runs. */
+export interface RoundResult {
+  round: number;
+  seed: number;
+  deal: HoldemDeal;
+  endedBy: 'fold' | 'showdown';
+  folder: Side | null;
   playerHand: HandResult;
   opponentHand: HandResult;
   winner: Side | 'tie';
-  /** The hand that "won" the round (player's on a tie) and its strength tier. */
-  featuredHand: HandResult;
+  /** Winner's hand at showdown (player's on a tie); null when someone folded. */
+  featuredHand: HandResult | null;
   tier: EffectTier;
-  attack: AttackResult | null;
-  /** Snapshot of both fighters before/after (opponent is the one fought this round). */
+  pot: number;
+  committed: Record<Side, number>;
+  /** Extra damage from the winning hand, burned from the loser. */
+  bonus: number;
+  eliminated: Side | null;
   player: { before: Fighter; after: Fighter };
   opponent: { before: Fighter; after: Fighter };
   survivors: { before: number; after: number; othersEliminated: number };
@@ -45,7 +84,13 @@ export interface GameState {
   opponent: Fighter;
   survivors: number;
   status: GameStatus;
+  /** Hand in progress, waiting for the player's action. */
+  hand: HandState | null;
   lastRound: RoundResult | null;
+  /** Full event log of the last finished hand (for replay). */
+  lastLog: GameEvent[];
+  /** Events produced by the most recent step (what the presentation should play). */
+  lastEvents: GameEvent[];
 }
 
 function makeOpponent(seed: number, round: number): Fighter {
@@ -62,77 +107,230 @@ export function createGame(seed: number): GameState {
     opponent: makeOpponent(seed >>> 0, 0),
     survivors: TOTAL_PLAYERS,
     status: 'playing',
+    hand: null,
     lastRound: null,
+    lastLog: [],
+    lastEvents: [],
   };
 }
 
-/**
- * Pure: resolves one complete round (deal → hands → attack → HP → eliminations)
- * and returns the next state. Same state in → same state out.
- */
-export function resolveRound(state: GameState): GameState {
-  if (state.status !== 'playing') return state;
+/** Mutable scratch copy used inside one pure step. */
+interface Work {
+  state: GameState;
+  hand: HandState;
+  hp: Record<Side, number>;
+  events: GameEvent[];
+}
+
+const potOf = (h: HandState) => h.committed.player + h.committed.opponent;
+
+function pay(w: Work, side: Side, amount: number, kind: 'bet' | 'call') {
+  const amt = Math.min(amount, w.hp[side]);
+  w.hp[side] -= amt;
+  w.hand = { ...w.hand, committed: { ...w.hand.committed, [side]: w.hand.committed[side] + amt } };
+  w.events.push({ t: 'bet', side, amount: amt, kind, allIn: w.hp[side] === 0 });
+}
+
+function aiContext(w: Work): AiContext {
+  const visible = w.hand.street === 'preflop' ? [] : w.hand.deal.board.slice(0, 3);
+  const rng = mulberry32(deriveSeed(w.hand.seed, 0xd0, w.hand.decisions));
+  w.hand = { ...w.hand, decisions: w.hand.decisions + 1 };
+  return {
+    hole: w.hand.deal.opponent,
+    board: visible,
+    pot: potOf(w.hand),
+    stack: w.hp.opponent,
+    maxBet: Math.min(w.hp.opponent, w.hp.player),
+    rng,
+  };
+}
+
+/** Start the next hand: deal (all cards fixed by the seed), post antes. */
+export function startHand(state: GameState): GameState {
+  if (state.status !== 'playing' || state.hand) return state;
   const round = state.round + 1;
   const seed = deriveSeed(state.seed, round);
-  const rng = mulberry32(seed);
+  const deal = dealHoldem(mulberry32(seed));
+  const ante = Math.min(anteFor(round), state.player.hp, state.opponent.hp);
+  const start: GameEvent = { t: 'start', round, ante, player: state.player, opponent: state.opponent, survivors: state.survivors };
+  const w: Work = {
+    state: { ...state, round },
+    hand: { round, seed, deal, street: 'preflop', committed: { player: ante, opponent: ante }, facing: 0, decisions: 0, log: [] },
+    hp: { player: state.player.hp - ante, opponent: state.opponent.hp - ante },
+    events: [start],
+  };
+  // Someone is all-in from the ante alone: no decisions left.
+  if (w.hp.player === 0 || w.hp.opponent === 0) return runout(w);
+  return pause(w);
+}
 
-  const deal = dealHoldem(rng);
-  const playerHand = evaluateBest([...deal.player, ...deal.board]);
-  const opponentHand = evaluateBest([...deal.opponent, ...deal.board]);
-  const cmp = compareHands(playerHand, opponentHand);
-  const winner: Side | 'tie' = cmp > 0 ? 'player' : cmp < 0 ? 'opponent' : 'tie';
+export function legalActions(state: GameState): LegalAction[] {
+  const h = state.hand;
+  if (!h) return [];
+  const stack = state.player.hp;
+  if (h.facing > 0) {
+    return [
+      { type: 'fold', amount: 0 },
+      { type: 'call', amount: Math.min(h.facing, stack) },
+    ];
+  }
+  const out: LegalAction[] = [{ type: 'check', amount: 0 }];
+  const max = Math.min(stack, state.opponent.hp);
+  if (max <= 0) return out;
+  const pot = potOf(h);
+  const half = Math.min(max, Math.max(1, Math.ceil(pot / 2)));
+  const full = Math.min(max, pot);
+  if (half < max) out.push({ type: 'bet', size: 'half', amount: half });
+  if (full > half && full < max) out.push({ type: 'bet', size: 'pot', amount: full });
+  out.push({ type: 'bet', size: 'allin', amount: max });
+  return out;
+}
 
-  let player = state.player;
-  let opponent = state.opponent;
-  let attack: AttackResult | null = null;
-  if (winner !== 'tie') {
-    const [w, l] = winner === 'player' ? [playerHand, opponentHand] : [opponentHand, playerHand];
-    const damage = calculateDamage(w, l);
-    if (winner === 'player') {
-      const r = applyDamage(opponent, damage);
-      opponent = r.fighter;
-      attack = { attacker: 'player', target: 'opponent', damage, hp: r.change };
-    } else {
-      const r = applyDamage(player, damage);
-      player = r.fighter;
-      attack = { attacker: 'opponent', target: 'player', damage, hp: r.change };
+function sameAction(a: PlayerAction, b: PlayerAction): boolean {
+  return a.type === b.type && (a.type !== 'bet' || (b.type === 'bet' && a.size === b.size));
+}
+
+/**
+ * Apply the player's action, let the opponent respond, and advance as far as
+ * possible without another player decision. Illegal or stale actions are no-ops.
+ */
+export function playerAct(state: GameState, action: PlayerAction): GameState {
+  const h = state.hand;
+  if (!h || state.status !== 'playing') return state;
+  const legal = legalActions(state).find((l) => sameAction(l, action));
+  if (!legal) return state;
+  const w: Work = { state, hand: { ...h }, hp: { player: state.player.hp, opponent: state.opponent.hp }, events: [] };
+
+  switch (legal.type) {
+    case 'fold':
+      w.events.push({ t: 'fold', side: 'player' });
+      return settle(w, 'player');
+    case 'call':
+      pay(w, 'player', legal.amount, 'call');
+      w.hand = { ...w.hand, facing: 0 };
+      return closeStreet(w);
+    case 'check': {
+      w.events.push({ t: 'check', side: 'player' });
+      const bet = decideOpen(aiContext(w));
+      if (bet > 0) {
+        pay(w, 'opponent', bet, 'bet');
+        w.hand = { ...w.hand, facing: bet };
+        return pause(w);
+      }
+      w.events.push({ t: 'check', side: 'opponent' });
+      return closeStreet(w);
+    }
+    case 'bet': {
+      pay(w, 'player', legal.amount, 'bet');
+      const reply = decideFacing(aiContext(w), legal.amount);
+      if (reply === 'fold') {
+        w.events.push({ t: 'fold', side: 'opponent' });
+        return settle(w, 'opponent');
+      }
+      pay(w, 'opponent', legal.amount, 'call');
+      return closeStreet(w);
     }
   }
-  const featuredHand = winner === 'opponent' ? opponentHand : playerHand;
+}
+
+function closeStreet(w: Work): GameState {
+  if (w.hand.street === 'preflop' && w.hp.player > 0 && w.hp.opponent > 0) {
+    w.hand = { ...w.hand, street: 'flop', facing: 0 };
+    w.events.push({ t: 'street' });
+    return pause(w);
+  }
+  return runout(w);
+}
+
+function runout(w: Work): GameState {
+  w.events.push({ t: 'runout', from: w.hand.street === 'preflop' ? 0 : 3 });
+  w.events.push({ t: 'showdown' });
+  return settle(w, null);
+}
+
+/** Hand continues: store progress and wait for the player. */
+function pause(w: Work): GameState {
+  const log = [...w.hand.log, ...w.events];
+  return {
+    ...w.state,
+    player: { ...w.state.player, hp: w.hp.player },
+    opponent: { ...w.state.opponent, hp: w.hp.opponent },
+    hand: { ...w.hand, log },
+    lastEvents: w.events,
+  };
+}
+
+function settle(w: Work, folder: Side | null): GameState {
+  const { state, hand } = w;
+  const start = (hand.log[0] ?? w.events[0]) as Extract<GameEvent, { t: 'start' }>;
+  const pot = potOf(hand);
+  const playerHand = evaluateBest([...hand.deal.player, ...hand.deal.board]);
+  const opponentHand = evaluateBest([...hand.deal.opponent, ...hand.deal.board]);
+  const hp = { ...w.hp };
+
+  let winner: Side | 'tie';
+  let bonus = 0;
+  if (folder) {
+    winner = other(folder);
+    hp[winner] += pot;
+  } else {
+    const cmp = compareHands(playerHand, opponentHand);
+    winner = cmp > 0 ? 'player' : cmp < 0 ? 'opponent' : 'tie';
+    if (winner === 'tie') {
+      hp.player += hand.committed.player;
+      hp.opponent += hand.committed.opponent;
+    } else {
+      hp[winner] += pot;
+      const loser = other(winner);
+      bonus = Math.min(hp[loser], handBonus(winner === 'player' ? playerHand : opponentHand));
+      hp[loser] -= bonus;
+    }
+  }
+  const featuredHand = folder ? null : winner === 'opponent' ? opponentHand : playerHand;
+  const grow = (f: Fighter, v: number): Fighter => ({ ...f, hp: v, maxHp: Math.max(f.maxHp, v) });
+  const player = grow(state.player, hp.player);
+  const opponent = grow(state.opponent, hp.opponent);
+  const eliminated: Side | null = player.hp === 0 ? 'player' : opponent.hp === 0 ? 'opponent' : null;
 
   // Other tables keep playing: up to 3 eliminations elsewhere each round.
+  const rng = mulberry32(deriveSeed(hand.seed, 0x07e5));
   const others = Math.max(0, state.survivors - 2);
   const othersEliminated = Math.min(others, randInt(rng, 0, 3));
-  const opponentOut = opponent.hp === 0;
-  const playerOut = player.hp === 0;
-  const survivorsAfter = state.survivors - othersEliminated - (opponentOut ? 1 : 0) - (playerOut ? 1 : 0);
-
-  const status: GameStatus = playerOut ? 'lost' : survivorsAfter <= 1 ? 'won' : 'playing';
+  const survivorsAfter = state.survivors - othersEliminated - (eliminated ? 1 : 0);
+  const status: GameStatus = eliminated === 'player' ? 'lost' : survivorsAfter <= 1 ? 'won' : 'playing';
 
   const result: RoundResult = {
-    round,
-    seed,
-    deal,
+    round: hand.round,
+    seed: hand.seed,
+    deal: hand.deal,
+    endedBy: folder ? 'fold' : 'showdown',
+    folder,
     playerHand,
     opponentHand,
     winner,
     featuredHand,
-    tier: effectTier(featuredHand.category),
-    attack,
-    player: { before: state.player, after: player },
-    opponent: { before: state.opponent, after: opponent },
+    tier: featuredHand ? effectTier(featuredHand.category) : 0,
+    pot,
+    committed: hand.committed,
+    bonus,
+    eliminated,
+    player: { before: start.player, after: player },
+    opponent: { before: start.opponent, after: opponent },
     survivors: { before: state.survivors, after: survivorsAfter, othersEliminated },
     statusAfter: status,
   };
+  const events: GameEvent[] = [...w.events, { t: 'award', result }];
 
   return {
     ...state,
-    round,
     player,
     // A knocked-out opponent is replaced by the next challenger.
-    opponent: opponentOut && status === 'playing' ? makeOpponent(state.seed, round) : opponent,
+    opponent: eliminated === 'opponent' && status === 'playing' ? makeOpponent(state.seed, hand.round) : opponent,
     survivors: survivorsAfter,
     status,
+    hand: null,
     lastRound: result,
+    lastLog: [...hand.log, ...events],
+    lastEvents: events,
   };
 }

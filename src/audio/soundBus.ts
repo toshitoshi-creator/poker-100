@@ -5,6 +5,9 @@
 export type SoundId =
   | 'deal'
   | 'flip'
+  | 'check'
+  | 'chips'
+  | 'fold'
   | 'reveal'
   | 'handMinor'
   | 'handMajor'

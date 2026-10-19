@@ -96,10 +96,6 @@ body {
   color: #241a00;
   font-weight: 700;
 }
-.hud-round {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
 
 /* ---------- Stage ---------- */
 .stage {
@@ -269,6 +265,8 @@ body {
 /* Hidden until the Director reveals them (GSAP autoAlpha overrides inline). */
 [data-label],
 [data-dmg],
+[data-gain],
+[data-chip],
 [data-ko],
 [data-banner],
 [data-flash],
@@ -498,10 +496,53 @@ body {
 
 /* ---------- Controls ---------- */
 .controls {
+  /* Always tappable, even if a shaking/overflowing stage overlaps it. */
+  position: relative;
+  z-index: 10;
   display: grid;
-  grid-template-columns: 1fr 1.6fr auto;
+  grid-template-columns: 1fr 1.8fr;
   gap: 8px;
   padding: 10px 16px 6px;
+  min-height: 74px;
+}
+.btn--wide:only-child {
+  grid-column: 1 / -1;
+}
+/* Decision row: 2–4 action buttons, equal width. */
+.controls--actions {
+  grid-template-columns: repeat(var(--n, 4), 1fr);
+}
+.controls--actions.n2 {
+  --n: 2;
+}
+.controls--actions.n3 {
+  --n: 3;
+}
+.btn--action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-height: 58px;
+  padding: 4px 2px;
+  line-height: 1.15;
+}
+.btn--action small {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+.btn--danger {
+  background: #3a0d12;
+  border: 1px solid #d8323c88;
+  color: #ffb3b8;
+}
+.btn--allin {
+  background: linear-gradient(180deg, #ff6b5c, #c81e2b);
+  color: #fff;
+  box-shadow: 0 3px 0 #7a0d15;
 }
 .btn {
   min-height: 48px;
@@ -531,9 +572,106 @@ body {
   background: #ffffff14;
   border: 1px solid #ffffff2a;
 }
-.controls-mini {
+.hud-mini {
   display: flex;
   gap: 6px;
+}
+.hud-mini .btn--mini {
+  min-height: 32px;
+  min-width: 36px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
+/* ---------- Pot, chips, speech ---------- */
+.table-center {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.pot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 76px;
+  padding: 6px 12px;
+  border-radius: 12px;
+  background: #00000055;
+  border: 1px solid #f5c84c55;
+  line-height: 1.1;
+}
+.pot-cap {
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+}
+.pot b {
+  font-size: 26px;
+  color: var(--gold);
+  font-variant-numeric: tabular-nums;
+}
+.pot-ante {
+  font-size: 10px;
+  color: var(--muted);
+}
+.chip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0 22%, var(--red) 24% 58%, #fff 60% 68%, var(--red) 70%);
+  box-shadow: 0 2px 3px #0008;
+  will-change: transform;
+}
+.avatar {
+  position: relative;
+  /* GSAP transforms make the avatar a stacking context; keep its speech bubble above the HP bar. */
+  z-index: 5;
+}
+.say {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  margin-left: 6px;
+  transform: translateY(-50%);
+  padding: 3px 9px;
+  border-radius: 10px;
+  background: var(--ink);
+  color: #13221b;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  z-index: 4;
+  animation: say-pop 0.25s ease-out;
+  box-shadow: 0 2px 6px #0008;
+}
+@keyframes say-pop {
+  from {
+    transform: translateY(-50%) scale(0.6);
+    opacity: 0;
+  }
+}
+.gain-pop {
+  position: absolute;
+  top: 36px;
+  left: 22%;
+  z-index: 3;
+  font-size: 28px;
+  font-weight: 900;
+  color: #6ff0a0;
+  text-shadow: 0 2px 0 #003316, 0 0 10px #00ff6688;
+  pointer-events: none;
+}
+.seat--player .gain-pop {
+  top: auto;
+  bottom: 36px;
+}
+.hp-num small {
+  margin-left: 2px;
+  font-size: 10px;
 }
 .btn--mini {
   min-width: 44px;
@@ -579,6 +717,9 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .say {
+    animation: none;
+  }
   .hp-lag {
     transition: none;
   }
@@ -600,6 +741,18 @@ body {
 .btn {
   white-space: nowrap;
 }
+@media (max-width: 480px) {
+  .hud {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .hud-steps {
+    order: 3;
+    width: 100%;
+    justify-content: center;
+  }
+}
+
 @media (max-width: 380px) {
   .hud {
     gap: 4px;
@@ -614,18 +767,53 @@ body {
     padding: 2px 4px;
     font-size: 9px;
   }
-  .hud-round {
-    display: none;
-  }
-  .controls {
-    grid-template-columns: auto 1fr auto;
-  }
   .btn {
     font-size: 14px;
     padding: 0 10px;
   }
-  .btn--mini {
-    min-width: 40px;
-    padding: 0 6px;
+  .btn--action {
+    padding: 4px 0;
+    font-size: 13px;
+  }
+}
+
+/* Short screens (iPhone SE and landscape-ish heights): shrink cards and spacing to fit. */
+@media (max-height: 700px) {
+  :root {
+    --cw: min(16.5vw, 74px, 8dvh);
+  }
+  .seed {
+    display: none;
+  }
+  .seat {
+    gap: 3px;
+  }
+  .hand-label {
+    min-height: 1.2em;
+    font-size: 12px;
+  }
+  .board-area {
+    gap: 8px;
+  }
+  .pot {
+    padding: 3px 10px;
+  }
+  .pot b {
+    font-size: 20px;
+  }
+  .avatar {
+    padding: 2px 8px 2px 2px;
+    font-size: 12px;
+  }
+  .avatar-icon {
+    width: 22px;
+    height: 22px;
+  }
+  .controls {
+    min-height: 0;
+    padding-top: 6px;
+  }
+  .btn--action {
+    min-height: 50px;
   }
 }

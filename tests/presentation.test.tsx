@@ -1,87 +1,142 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { App } from '../src/App';
-import { createGame, resolveRound, type GameState } from '../src/logic/game';
+import { createGame, playerAct, startHand, type GameState, type PlayerAction } from '../src/logic/game';
+import { mulberry32 } from '../src/logic/rng';
+import { currentLog, viewAt } from '../src/presentation/view';
+import { autoplay } from './helpers/autoplay';
 
-const SEED = 3453; // round 1: straight flush → KO
+const num = (id: string) => Number(screen.getByTestId(id).textContent);
+const visible = (el: Element | null) => !!el && (el as HTMLElement).style.visibility !== 'hidden' && (el as HTMLElement).style.opacity !== '0';
+const click = (el: Element) => act(() => fireEvent.click(el));
+const primary = () => screen.queryByTestId('primary');
+const isPlaying = () => primary()?.textContent?.includes('スキップ') ?? false;
 
-function expectedAfter(seed: number, rounds: number): GameState {
-  let s = createGame(seed);
-  for (let i = 0; i < rounds; i++) s = resolveRound(s);
+/** Tap through a whole hand, skipping every animation; mirrors the moves on a pure state. */
+function playHandWithChecks(state: GameState): GameState {
+  click(primary()!); // deal
+  let s = startHand(state);
+  for (let guard = 0; guard < 10; guard++) {
+    if (isPlaying()) click(primary()!);
+    if (!s.hand) break;
+    const a: PlayerAction = s.hand.facing > 0 ? { type: 'call' } : { type: 'check' };
+    click(screen.getByTestId(a.type === 'call' ? 'act-call' : 'act-check'));
+    s = playerAct(s, a);
+  }
+  if (isPlaying()) click(primary()!);
   return s;
 }
 
-const primary = () => document.querySelector<HTMLButtonElement>('.controls .btn--primary')!;
-const hp = (side: 'player' | 'opponent') => Number(screen.getByTestId(`hp-${side}`).textContent);
-const survivors = () => Number(screen.getByTestId('survivors').textContent);
-const visible = (el: Element | null) => !!el && (el as HTMLElement).style.visibility !== 'hidden' && (el as HTMLElement).style.opacity !== '0';
+function expectScreenMatches(s: GameState) {
+  const r = s.lastRound!;
+  expect(num('hp-player')).toBe(r.player.after.hp);
+  expect(num('hp-opponent')).toBe(r.opponent.after.hp);
+  expect(num('survivors')).toBe(s.survivors);
+  expect(num('pot')).toBe(0);
+}
 
 afterEach(cleanup);
 
-describe('presentation', () => {
-  it('shows the pre-round values while playing, and the decided result after skip', () => {
-    render(<App seed={SEED} />);
-    const r1 = expectedAfter(SEED, 1).lastRound!;
-
-    act(() => fireEvent.click(primary())); // deal
-    expect(primary().textContent).toContain('スキップ');
-    // Logic is final, but the screen still shows the "before" numbers.
-    expect(hp('opponent')).toBe(r1.opponent.before.hp);
-    // Cards are rendered face down until revealed.
-    const front = document.querySelector('[data-card="o0"] .card-front')!;
-    expect(visible(front)).toBe(false);
-
-    act(() => fireEvent.click(primary())); // skip
-    expect(primary().textContent).toContain('次');
-    expect(hp('opponent')).toBe(r1.opponent.after.hp);
-    expect(hp('player')).toBe(r1.player.after.hp);
-    expect(survivors()).toBe(r1.survivors.after);
-
-    // End state of every visual is applied.
-    for (const slot of ['p0', 'p1', 'o0', 'o1', 'b0', 'b1', 'b2', 'b3', 'b4']) {
-      expect(visible(document.querySelector(`[data-card="${slot}"] .card-front`))).toBe(true);
-      expect(visible(document.querySelector(`[data-card="${slot}"] .card-back`))).toBe(false);
+describe('view reducer', () => {
+  it('replaying any hand log lands on the logic state', () => {
+    for (const seed of [1, 2, 3, 4, 5]) {
+      for (const s of autoplay(seed, 120)) {
+        const log = currentLog(s);
+        if (!log.length) continue;
+        const v = viewAt(log, log.length);
+        if (s.hand) {
+          expect(v.playerHp).toBe(s.player.hp);
+          expect(v.opponentHp).toBe(s.opponent.hp);
+          expect(v.pot).toBe(s.hand.committed.player + s.hand.committed.opponent);
+        } else {
+          expect(v.playerHp).toBe(s.lastRound!.player.after.hp);
+          expect(v.survivors).toBe(s.survivors);
+          expect(v.pot).toBe(0);
+        }
+      }
     }
+  });
+});
+
+describe('presentation', () => {
+  it('bets move HP into the pot; skip lands on the decided numbers', () => {
+    render(<App seed={42} />);
+    click(primary()!); // deal → antes posted (animating)
+    expect(isPlaying()).toBe(true);
+    click(primary()!); // skip
+    const s1 = startHand(createGame(42));
+    expect(num('hp-player')).toBe(s1.player.hp);
+    expect(num('pot')).toBe(4);
+    // Player cards face up, opponent face down, board hidden.
+    expect(visible(document.querySelector('[data-card="p0"] .card-front'))).toBe(true);
+    expect(visible(document.querySelector('[data-card="o0"] .card-front'))).toBe(false);
+    expect(visible(document.querySelector('[data-card="b0"]'))).toBe(false);
+
+    click(screen.getByTestId('act-bet-half'));
+    click(primary()!); // skip
+    const s2 = playerAct(s1, { type: 'bet', size: 'half' });
+    if (s2.hand) {
+      expect(num('hp-player')).toBe(s2.player.hp);
+      expect(num('pot')).toBe(s2.hand.committed.player + s2.hand.committed.opponent);
+      expect(visible(document.querySelector('[data-card="b2"]'))).toBe(true); // flop is out
+      expect(visible(document.querySelector('[data-card="b3"]'))).toBe(false);
+    } else {
+      expectScreenMatches(s2);
+    }
+  });
+
+  it('a full hand ends with every effect element at rest and the right numbers', () => {
+    render(<App seed={3453} />);
+    const s = playHandWithChecks(createGame(3453));
+    expectScreenMatches(s);
     expect(visible(document.querySelector('[data-banner]'))).toBe(false);
     expect(visible(document.querySelector('[data-projectile]'))).toBe(false);
-    expect(visible(document.querySelector('[data-ko="opponent"]'))).toBe(true);
-    document.querySelectorAll('[data-particle]').forEach((p) => expect(visible(p)).toBe(false));
+    document.querySelectorAll('[data-particle], [data-chip]').forEach((p) => expect(visible(p)).toBe(false));
+    if (s.lastRound!.endedBy === 'showdown') {
+      for (const slot of ['o0', 'o1', 'b4']) expect(visible(document.querySelector(`[data-card="${slot}"] .card-front`))).toBe(true);
+    }
   });
 
-  it('survives rapid tapping: state equals the logic-only result', () => {
+  it('survives rapid tapping of whatever button is there', () => {
     render(<App seed={77} />);
-    let dealt = 0;
-    for (let i = 0; i < 40; i++) {
-      const isDeal = !primary().textContent!.includes('スキップ');
-      if (isDeal && primary().disabled) break;
-      act(() => fireEvent.click(primary()));
-      if (isDeal) dealt++;
+    const rng = mulberry32(1);
+    let s = createGame(77);
+    let steps = 0;
+    for (let i = 0; i < 300 && s.status === 'playing'; i++) {
+      const btns = [...document.querySelectorAll<HTMLButtonElement>('.controls button:not(:disabled)')];
+      if (!btns.length) break;
+      const btn = btns[Math.floor(rng() * btns.length)]!;
+      const id = btn.dataset.testid ?? '';
+      // Mirror only the taps that are real game steps.
+      if (id === 'primary' && !isPlaying()) s = startHand(s);
+      else if (id.startsWith('act-')) {
+        const [, type, size] = id.split('-') as [string, PlayerAction['type'], 'half' | 'pot' | 'allin' | undefined];
+        s = playerAct(s, type === 'bet' ? { type, size: size! } : ({ type } as PlayerAction));
+        steps++;
+      }
+      click(btn);
+      // Sometimes tap again immediately (double tap) on whatever is now under the finger.
+      if (rng() < 0.3) {
+        const again = document.querySelector<HTMLButtonElement>('.controls button:not(:disabled)');
+        if (again?.dataset.testid === 'primary' && isPlaying()) click(again);
+      }
     }
-    // Make sure the last round is settled.
-    if (primary().textContent!.includes('スキップ')) act(() => fireEvent.click(primary()));
-    const expected = expectedAfter(77, dealt);
-    expect(hp('player')).toBe(expected.lastRound!.player.after.hp);
-    expect(hp('opponent')).toBe(expected.lastRound!.opponent.after.hp);
-    expect(survivors()).toBe(expected.survivors);
+    expect(steps).toBeGreaterThan(5);
+    if (isPlaying()) click(primary()!);
+    if (!s.hand && s.lastRound) expectScreenMatches(s);
+    else {
+      expect(num('hp-player')).toBe(s.player.hp);
+      expect(num('pot')).toBe(s.hand!.committed.player + s.hand!.committed.opponent);
+    }
   });
 
-  it('a new deal mid-animation fast-forwards the previous round without breaking it', () => {
-    render(<App seed={SEED} />);
-    act(() => fireEvent.click(primary())); // deal round 1 (playing)
-    const replay = screen.getByText(/リプレイ/);
-    expect((replay as HTMLButtonElement).disabled).toBe(true);
-    act(() => fireEvent.click(primary())); // skip
-    act(() => fireEvent.click(replay)); // replay round 1
-    expect(hp('opponent')).toBe(expectedAfter(SEED, 1).lastRound!.opponent.before.hp);
-    act(() => fireEvent.click(primary())); // skip replay
-    act(() => fireEvent.click(primary())); // deal round 2 → playing
-    act(() => fireEvent.click(primary())); // skip
-    const s2 = expectedAfter(SEED, 2);
-    expect(hp('player')).toBe(s2.lastRound!.player.after.hp);
-    expect(hp('opponent')).toBe(s2.lastRound!.opponent.after.hp);
-    // Round 2 is against the next challenger, whose KO stamp must be hidden again.
-    if (!s2.lastRound!.attack?.hp.eliminated) {
-      expect(visible(document.querySelector('[data-ko="opponent"]'))).toBe(false);
-    }
+  it('replay re-runs the last hand without touching the result', () => {
+    render(<App seed={5} />);
+    const s = playHandWithChecks(createGame(5));
+    click(screen.getByText(/リプレイ/));
+    expect(isPlaying()).toBe(true);
+    expect(num('pot')).toBe(0); // replay starts before the antes
+    click(primary()!);
+    expectScreenMatches(s);
   });
 
   it('honours prefers-reduced-motion and still lands on the same result', () => {
@@ -93,11 +148,9 @@ describe('presentation', () => {
       removeEventListener() {},
     })) as unknown as typeof window.matchMedia;
     try {
-      render(<App seed={SEED} />);
+      render(<App seed={3453} />);
       expect(document.querySelector('.app')!.classList.contains('is-reduced')).toBe(true);
-      act(() => fireEvent.click(primary()));
-      act(() => fireEvent.click(primary()));
-      expect(hp('opponent')).toBe(expectedAfter(SEED, 1).lastRound!.opponent.after.hp);
+      expectScreenMatches(playHandWithChecks(createGame(3453)));
     } finally {
       window.matchMedia = mm;
     }

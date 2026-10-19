@@ -1,88 +1,107 @@
-import { BASE_DAMAGE, calculateDamage, effectTier } from '../src/logic/combat';
-import { createGame, resolveRound, TOTAL_PLAYERS, type GameState } from '../src/logic/game';
+import { anteFor, effectTier, HAND_BONUS } from '../src/logic/combat';
+import { createGame, legalActions, playerAct, startHand, TOTAL_PLAYERS, type GameState } from '../src/logic/game';
 import { HandCategory } from '../src/logic/handEvaluator';
-import { applyDamage } from '../src/logic/hp';
+import { autoplay } from './helpers/autoplay';
 
-function playOut(seed: number, maxRounds = 500): GameState[] {
-  const states = [createGame(seed)];
-  while (states.at(-1)!.status === 'playing' && states.length < maxRounds) states.push(resolveRound(states.at(-1)!));
-  return states;
-}
+const total = (s: GameState) => s.player.hp + s.opponent.hp + (s.hand ? s.hand.committed.player + s.hand.committed.opponent : 0);
 
-describe('hp', () => {
-  it('clamps at 0 and flags elimination', () => {
-    const f = { id: 'x', name: 'x', hp: 10, maxHp: 80 };
-    const r = applyDamage(f, 25);
-    expect(r.fighter.hp).toBe(0);
-    expect(r.change).toEqual({ before: 10, after: 0, lost: 10, eliminated: true });
-    expect(f.hp).toBe(10); // input not mutated
+describe('rules', () => {
+  it('ante rises every 4 rounds', () => {
+    expect([1, 4, 5, 8, 9, 13].map(anteFor)).toEqual([2, 2, 4, 4, 6, 8]);
   });
 
-  it('ignores negative damage', () => {
-    expect(applyDamage({ id: 'x', name: 'x', hp: 10, maxHp: 10 }, -5).fighter.hp).toBe(10);
-  });
-});
-
-describe('combat', () => {
-  it('stronger hands deal more and get a louder tier', () => {
+  it('stronger hands deal more bonus damage and get a louder tier', () => {
     const cats = Object.values(HandCategory).filter((v): v is HandCategory => typeof v === 'number');
     for (let i = 1; i < cats.length; i++) {
-      expect(BASE_DAMAGE[cats[i]!]).toBeGreaterThan(BASE_DAMAGE[cats[i - 1]!]);
+      expect(HAND_BONUS[cats[i]!]).toBeGreaterThanOrEqual(HAND_BONUS[cats[i - 1]!]);
       expect(effectTier(cats[i]!)).toBeGreaterThanOrEqual(effectTier(cats[i - 1]!));
     }
-    expect(effectTier(HandCategory.RoyalFlush)).toBe(4);
   });
 
-  it('adds a bonus for the category gap', () => {
-    const w = { category: HandCategory.Flush, score: [], cards: [] };
-    const l = { category: HandCategory.OnePair, score: [], cards: [] };
-    expect(calculateDamage(w, l)).toBe(BASE_DAMAGE[HandCategory.Flush] + 4 * 3);
+  it('startHand posts antes and waits for the player', () => {
+    const s = startHand(createGame(1));
+    expect(s.hand!.committed).toEqual({ player: 2, opponent: 2 });
+    expect(s.player.hp).toBe(98);
+    expect(s.hand!.facing).toBe(0);
+    expect(s.lastEvents.map((e) => e.t)).toEqual(['start']);
+    expect(startHand(s)).toBe(s); // cannot start twice
+  });
+
+  it('offers check / bets when not facing, fold / call when facing', () => {
+    const s = startHand(createGame(1));
+    expect(legalActions(s).map((a) => a.type + (a.type === 'bet' ? `:${a.size}` : ''))).toEqual([
+      'check',
+      'bet:half',
+      'bet:pot',
+      'bet:allin',
+    ]);
+    const facing = { ...s, hand: { ...s.hand!, facing: 10 } };
+    expect(legalActions(facing).map((a) => a.type)).toEqual(['fold', 'call']);
+  });
+
+  it('ignores illegal or stale actions', () => {
+    const s = startHand(createGame(1));
+    expect(playerAct(s, { type: 'call' })).toBe(s);
+    expect(playerAct(createGame(1), { type: 'check' })).toEqual(createGame(1));
+  });
+
+  it('folding hands the pot to the other side, no bonus', () => {
+    let found = false;
+    for (let seed = 1; seed < 200 && !found; seed++) {
+      const r = playerAct(startHand(createGame(seed)), { type: 'check' });
+      if (!r.hand || r.hand.facing === 0) continue; // opponent checked back
+      found = true;
+      const f = playerAct(r, { type: 'fold' });
+      expect(f.lastRound!.endedBy).toBe('fold');
+      expect(f.lastRound!.winner).toBe('opponent');
+      expect(f.lastRound!.bonus).toBe(0);
+      expect(f.opponent.hp).toBe(r.opponent.hp + r.hand.committed.player + r.hand.committed.opponent);
+    }
+    expect(found).toBe(true);
   });
 });
 
-describe('resolveRound', () => {
-  it('is reproducible from the seed', () => {
-    expect(playOut(12345)).toEqual(playOut(12345));
-    expect(playOut(1).map((s) => s.lastRound?.deal)).not.toEqual(playOut(2).map((s) => s.lastRound?.deal));
+describe('full games (random player policy)', () => {
+  const seeds = Array.from({ length: 25 }, (_, i) => i + 1);
+
+  it('is reproducible from the seed and the actions', () => {
+    expect(autoplay(12345)).toEqual(autoplay(12345));
   });
 
-  it('does not mutate the input state', () => {
-    const s = createGame(9);
-    const snapshot = JSON.stringify(s);
-    resolveRound(s);
-    expect(JSON.stringify(s)).toBe(snapshot);
-  });
-
-  it('keeps every invariant across many full games', () => {
-    for (let seed = 0; seed < 60; seed++) {
-      const states = playOut(seed);
-      const end = states.at(-1)!;
-      expect(end.status).not.toBe('playing');
+  it('keeps every invariant', () => {
+    for (const seed of seeds) {
+      const states = autoplay(seed);
       for (let i = 1; i < states.length; i++) {
         const prev = states[i - 1]!;
         const s = states[i]!;
-        const r = s.lastRound!;
-        expect(s.round).toBe(prev.round + 1);
-        expect(s.survivors).toBeLessThanOrEqual(prev.survivors);
-        expect(s.survivors).toBeGreaterThanOrEqual(1);
-        expect(r.survivors.before).toBe(prev.survivors);
-        expect(r.player.before).toEqual(prev.player);
-        expect(r.opponent.before).toEqual(prev.opponent);
-        if (r.winner === 'tie') expect(r.attack).toBeNull();
-        if (r.attack) {
-          expect(r.attack.target).not.toBe(r.attack.attacker);
-          expect(r.attack.hp.after).toBe(Math.max(0, r.attack.hp.before - r.attack.damage));
-        }
         expect(s.player.hp).toBeGreaterThanOrEqual(0);
+        expect(s.opponent.hp).toBeGreaterThanOrEqual(0);
+        expect(s.survivors).toBeLessThanOrEqual(prev.survivors);
+        if (s.hand) {
+          // Mid-hand: chips only move between stacks and the pot.
+          expect(total(s)).toBe(total(prev));
+          expect(s.hand.log.at(-1)).toBe(s.lastEvents.at(-1));
+        } else if (s.lastRound && s.lastRound.round === s.round) {
+          const r = s.lastRound;
+          expect(s.lastEvents.at(-1)!.t).toBe('award');
+          // Only the hand bonus leaves the table (KO'd opponents are replaced).
+          const after = r.player.after.hp + r.opponent.after.hp;
+          const before = r.player.before.hp + r.opponent.before.hp;
+          expect(after).toBe(before - r.bonus);
+          if (r.endedBy === 'fold') expect(r.featuredHand).toBeNull();
+          if (r.winner === 'tie') expect(r.bonus).toBe(0);
+          if (r.eliminated) expect(r[r.eliminated].after.hp).toBe(0);
+          expect(s.lastLog[0]!.t).toBe('start');
+        }
       }
+      const end = states.at(-1)!;
       if (end.status === 'won') expect(end.survivors).toBe(1);
       if (end.status === 'lost') expect(end.player.hp).toBe(0);
     }
   });
 
-  it('is a no-op once the game is over', () => {
-    const end = playOut(3).at(-1)!;
-    expect(resolveRound(end)).toBe(end);
+  it('every game eventually ends', () => {
+    for (const seed of seeds) expect(autoplay(seed, 2000).at(-1)!.status).not.toBe('playing');
   });
 
   it('starts with 100 survivors', () => {

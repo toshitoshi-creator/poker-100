@@ -1,28 +1,33 @@
 import gsap from 'gsap';
-import type { RoundResult, Side } from '../logic/game';
+import type { GameEvent, Side } from '../logic/game';
 import { mulberry32 } from '../logic/rng';
 import type { SoundBus, SoundId } from '../audio/soundBus';
 import type { MotionProfile } from './motion';
 import type { PresentationState, Store } from './store';
+import { reduceView, viewAt, type TableView } from './view';
 
 /**
  * DOM contract (rendered by ui/Table):
  *   [data-stage]                     root, shaken on big hits
- *   [data-deck]                      where cards fly from
+ *   [data-deck] [data-pot]           where cards / chips travel from and to
  *   [data-card="p0|p1|o0|o1|b0..b4"] card wrapper (moves), with data-card-id
  *     .card-inner / .card-back / .card-front / .card-glow
  *   [data-seat=side] [data-avatar=side] [data-hp=side] [data-label=side]
- *   [data-ko=side] [data-dmg=side]
- *   [data-banner] [data-flash] [data-projectile] [data-particle]×N
+ *   [data-ko=side] [data-dmg=side] [data-gain=side]
+ *   [data-banner] [data-flash] [data-projectile] [data-particle]×N [data-chip]×N
  */
 export interface Presenter {
-  play(result: RoundResult): void;
+  /** Animate events log[from..] starting from the table as it was after log[0..from). */
+  play(log: readonly GameEvent[], from: number): void;
+  /** Jump straight to a view (no animation). */
+  show(view: TableView): void;
   skip(): void;
   isPlaying(): boolean;
   reset(): void;
 }
 
 export const PARTICLE_POOL = 28;
+export const CHIP_POOL = 8;
 
 const TIER_FX = [
   { particles: 0, shake: 0, flash: 0, hold: 0.7 },
@@ -32,7 +37,11 @@ const TIER_FX = [
   { particles: 28, shake: 12, flash: 0.6, hold: 1.4 },
 ] as const;
 
-const DEAL_ORDER = ['p0', 'o0', 'p1', 'o1'] as const;
+const HOLE = ['p0', 'o0', 'p1', 'o1'] as const;
+const BOARD = ['b0', 'b1', 'b2', 'b3', 'b4'] as const;
+const SLOTS = [...HOLE, ...BOARD];
+const other = (s: Side): Side => (s === 'player' ? 'opponent' : 'player');
+const hpKey = (s: Side) => (s === 'player' ? 'playerHp' : 'opponentHp') as 'playerHp' | 'opponentHp';
 
 export interface DirectorOptions {
   root: HTMLElement;
@@ -41,10 +50,15 @@ export interface DirectorOptions {
   motion: MotionProfile;
 }
 
+type Tl = gsap.core.Timeline;
+
 export class Director implements Presenter {
-  private tl: gsap.core.Timeline | null = null;
-  private current: RoundResult | null = null;
+  private tl: Tl | null = null;
+  private final: TableView | null = null;
   private motion: MotionProfile;
+  /** Deck position relative to each card slot, measured at snap time. */
+  private deckOffset = new Map<string, { x: number; y: number }>();
+  private rand = Math.random;
 
   constructor(private readonly opts: DirectorOptions) {
     this.motion = opts.motion;
@@ -59,254 +73,407 @@ export class Director implements Presenter {
     return this.tl !== null;
   }
 
-  /** Jump to the end: every tween's end state is applied, callbacks are suppressed. */
+  /** Stop wherever we are and land on the decided end state. */
   skip(): void {
-    const tl = this.tl;
-    const result = this.current;
-    if (!tl || !result) return;
+    if (!this.tl) return;
+    this.tl.kill();
     this.tl = null;
-    tl.progress(1, true);
-    tl.kill();
-    this.finalize(result);
+    if (this.final) this.snap(this.final);
+    this.opts.store.set({ playing: false });
+  }
+
+  show(view: TableView): void {
+    this.tl?.kill();
+    this.tl = null;
+    this.final = view;
+    this.snap(view);
+    this.opts.store.set({ playing: false });
   }
 
   /** Remove every inline style the Director put on long-lived elements. */
   reset(): void {
     this.tl?.kill();
     this.tl = null;
-    this.current = null;
+    this.final = null;
     const els = this.all(
-      '[data-stage], [data-seat], [data-avatar], [data-label], [data-ko], [data-dmg], [data-banner], [data-flash], [data-projectile], [data-particle]',
+      '[data-seat], [data-avatar], [data-label], [data-ko], [data-dmg], [data-gain], [data-banner], [data-flash], [data-projectile], [data-particle], [data-chip]',
     );
     if (els.length) gsap.set(els, { clearProps: 'all' });
-    if (this.opts.root.matches('[data-stage]')) gsap.set(this.opts.root, { clearProps: 'all' });
+    gsap.set(this.stage(), { clearProps: 'all' });
   }
 
-  play(result: RoundResult): void {
+  play(log: readonly GameEvent[], from: number): void {
     if (this.tl) this.skip();
-    this.current = result;
-    const { store, sound } = this.opts;
-    const R = this.motion.reduced;
-    const rand = mulberry32(result.seed ^ 0x5eed); // cosmetic only
-    const fx = TIER_FX[result.tier];
+    if (from >= log.length) return;
+    let view = viewAt(log, from);
+    this.final = viewAt(log, log.length);
+    const start = log[0] as Extract<GameEvent, { t: 'start' }>;
+    this.rand = mulberry32((start.round * 2654435761) ^ from); // cosmetic only
+    this.snap(view);
 
-    store.set({
-      round: result.round,
-      phase: 'deal',
-      playing: true,
-      settled: false,
-      playerHp: result.player.before.hp,
-      opponentHp: result.opponent.before.hp,
-      survivors: result.survivors.before,
-    });
-
-    // ---- initial state -------------------------------------------------
-    const stage = this.stage();
-    const deck = this.one('[data-deck]');
-    const slots = [...DEAL_ORDER, 'b0', 'b1', 'b2', 'b3', 'b4'];
-    const cards = new Map(slots.map((s) => [s, this.one(`[data-card="${s}"]`)]));
-    const cardEls = [...cards.values()].filter(Boolean) as HTMLElement[];
-
-    gsap.set(stage, { x: 0, y: 0 });
-    gsap.set(this.all('[data-seat]'), { x: 0, y: 0 });
-    gsap.set(cardEls, { x: 0, y: 0, rotation: 0, scale: 1, autoAlpha: 1 });
-    gsap.set(this.all('[data-card] .card-inner'), { rotationY: 0 });
-    gsap.set(this.all('[data-card] .card-back'), { autoAlpha: 1 });
-    gsap.set(this.all('[data-card] .card-front'), { autoAlpha: 0 });
-    gsap.set(this.all('[data-card] .card-glow'), { autoAlpha: 0 });
-    gsap.set(this.all('[data-avatar]'), { autoAlpha: 1, y: 0, rotation: 0, scale: 1 });
-    gsap.set(this.all('[data-label], [data-ko], [data-dmg], [data-projectile], [data-particle], [data-banner]'), {
-      autoAlpha: 0,
-    });
-    gsap.set(this.all('[data-flash]'), { autoAlpha: 0 });
-
-    // Measure deck → slot offsets after transforms are reset.
-    const deckC = deck ? centerOf(deck) : { x: 0, y: 0 };
-    for (const el of cardEls) {
-      const c = centerOf(el);
-      gsap.set(el, {
-        x: deckC.x - c.x,
-        y: deckC.y - c.y,
-        rotation: R ? 0 : (rand() - 0.5) * 30,
-        autoAlpha: 0,
-      });
-    }
-
-    // ---- timeline ------------------------------------------------------
-    const tl = gsap.timeline({ onComplete: () => this.complete(tl, result) });
+    const tl = gsap.timeline({ onComplete: () => this.complete(tl) });
     tl.timeScale(this.motion.speed);
     this.tl = tl;
-    const cue = (id: SoundId, at?: gsap.Position, vol = 1) => tl.call(() => sound.play(id, vol), undefined, at);
-    const phase = (p: PresentationState['phase'], at?: gsap.Position) =>
-      tl.call(() => store.set({ phase: p }), undefined, at);
+    this.opts.store.set({ playing: true });
+    for (let i = from; i < log.length; i++) {
+      const next = reduceView(view, log[i]!);
+      this.animate(tl, log[i]!, view, next);
+      view = next;
+    }
+    tl.to({}, { duration: 0.15 }); // tail so the last frame is visible
+  }
 
-    const fly = (slot: string, at: gsap.Position) => {
-      const el = cards.get(slot);
-      if (!el) return;
-      if (R) {
-        tl.set(el, { x: 0, y: 0, rotation: 0 }, at).to(el, { autoAlpha: 1, duration: 0.15 }, '<');
-      } else {
-        tl.set(el, { autoAlpha: 1 }, at).to(el, { x: 0, y: 0, rotation: 0, duration: 0.45, ease: 'power3.out' }, '<');
+  private complete(tl: Tl) {
+    if (this.tl !== tl) return;
+    this.tl = null;
+    if (this.final) this.snap(this.final);
+    this.opts.store.set({ playing: false });
+  }
+
+  // ---- static state ----------------------------------------------------
+
+  /** Put every element exactly where `v` says, and sync the store. */
+  private snap(v: TableView): void {
+    const { store } = this.opts;
+    store.set({
+      round: v.round,
+      phase: v.phase,
+      playerHp: v.playerHp,
+      opponentHp: v.opponentHp,
+      pot: v.pot,
+      survivors: v.survivors,
+      sayPlayer: v.say.player,
+      sayOpponent: v.say.opponent,
+    });
+
+    gsap.set(this.stage(), { x: 0, y: 0 });
+    gsap.set(this.all('[data-seat]'), { x: 0, y: 0 });
+    gsap.set(this.all('[data-label], [data-dmg], [data-gain], [data-banner], [data-flash], [data-projectile], [data-particle], [data-chip]'), {
+      autoAlpha: 0,
+    });
+
+    const cards: [string, HTMLElement][] = [];
+    for (const s of SLOTS) {
+      const el = this.one(`[data-card="${s}"]`);
+      if (el) cards.push([s, el]);
+    }
+    // Measure with transforms cleared.
+    gsap.set(cards.map((c) => c[1]), { x: 0, y: 0, rotation: 0, scale: 1 });
+    const deck = this.one('[data-deck]');
+    const d = deck ? centerOf(deck) : { x: 0, y: 0 };
+    this.deckOffset.clear();
+    for (const [slot, el] of cards) {
+      const c = centerOf(el);
+      this.deckOffset.set(slot, { x: d.x - c.x, y: d.y - c.y });
+    }
+
+    const r = v.result?.endedBy === 'showdown' ? v.result : null;
+    const featured = new Set(r?.featuredHand?.cards.map((c) => c.id) ?? []);
+    for (const [slot, el] of cards) {
+      const isBoard = slot.startsWith('b');
+      const shown = isBoard ? v.dealt && Number(slot.slice(1)) < v.boardShown : v.dealt;
+      const faceUp = shown && (slot.startsWith('o') ? v.oppRevealed : true);
+      const off = this.deckOffset.get(slot)!;
+      const folded = (slot.startsWith('p') && v.folded === 'player') || (slot.startsWith('o') && v.folded === 'opponent');
+      const hi = featured.has(el.dataset.cardId ?? '');
+      gsap.set(el, shown ? { autoAlpha: folded || (r && !hi) ? 0.4 : 1, y: hi ? -10 : 0 } : { ...off, autoAlpha: 0 });
+      this.setFace(el, faceUp);
+      gsap.set(el.querySelector('.card-glow'), { autoAlpha: hi ? 1 : 0 });
+    }
+
+    if (r) gsap.set(this.all('[data-label]'), { autoAlpha: 1 });
+    for (const side of ['player', 'opponent'] as const) {
+      const out = v.result?.eliminated === side;
+      gsap.set(this.all(`[data-avatar="${side}"]`), out ? { autoAlpha: 0.3, y: 8, rotation: -8, scale: 1 } : { autoAlpha: 1, y: 0, rotation: 0, scale: 1 });
+      gsap.set(this.all(`[data-ko="${side}"]`), out ? { autoAlpha: 1, scale: 1, rotation: -12 } : { autoAlpha: 0 });
+    }
+  }
+
+  private setFace(el: Element, up: boolean) {
+    gsap.set(el.querySelector('.card-inner'), { rotationY: up ? 180 : 0 });
+    gsap.set(el.querySelector('.card-back'), { autoAlpha: up ? 0 : 1 });
+    gsap.set(el.querySelector('.card-front'), { autoAlpha: up ? 1 : 0 });
+  }
+
+  // ---- animation -------------------------------------------------------
+
+  private animate(tl: Tl, e: GameEvent, before: TableView, after: TableView) {
+    const R = this.motion.reduced;
+    const say = () => this.set(tl, { sayPlayer: after.say.player, sayOpponent: after.say.opponent });
+    switch (e.t) {
+      case 'start': {
+        this.set(tl, { phase: 'deal', round: e.round, survivors: e.survivors });
+        tl.addLabel('ante');
+        this.chips(tl, 'player', 'pot', 'ante');
+        this.chips(tl, 'opponent', 'pot', 'ante');
+        this.num(tl, 'playerHp', before.playerHp, after.playerHp, 0.4, 'ante+=0.2');
+        this.num(tl, 'opponentHp', before.opponentHp, after.opponentHp, 0.4, 'ante+=0.2');
+        this.num(tl, 'pot', before.pot, after.pot, 0.4, 'ante+=0.2');
+        HOLE.forEach((s, i) => this.fly(tl, s, `ante+=${0.3 + i * 0.14}`));
+        tl.addLabel('holeFlip', '+=0.15');
+        this.flip(tl, 'p0', 'holeFlip');
+        this.flip(tl, 'p1', 'holeFlip+=0.12');
+        this.set(tl, { phase: 'preflop' });
+        return;
       }
-      cue('deal', '<');
-    };
+      case 'check':
+        say();
+        this.cue(tl, 'check');
+        tl.to({}, { duration: R ? 0.15 : 0.45 });
+        return;
+      case 'bet': {
+        say();
+        tl.addLabel(`bet`);
+        this.chips(tl, e.side, 'pot', 'bet');
+        this.num(tl, hpKey(e.side), before[hpKey(e.side)], after[hpKey(e.side)], 0.35, 'bet+=0.15');
+        this.num(tl, 'pot', before.pot, after.pot, 0.35, 'bet+=0.15');
+        if (e.allIn && !R) {
+          this.shake(tl, this.one(`[data-seat="${e.side}"]`), 6, 'bet+=0.2');
+          this.flash(tl, 0.12, 'bet+=0.2');
+        }
+        tl.to({}, { duration: R ? 0.1 : 0.3 });
+        return;
+      }
+      case 'fold': {
+        say();
+        this.cue(tl, 'fold');
+        const prefix = e.side === 'player' ? 'p' : 'o';
+        const els = [0, 1].map((i) => this.one(`[data-card="${prefix}${i}"]`)).filter(Boolean);
+        tl.to(els, { autoAlpha: 0.4, y: R ? 0 : e.side === 'player' ? 8 : -8, duration: 0.3 });
+        tl.to(els, { y: 0, duration: 0.2 });
+        tl.to({}, { duration: 0.25 });
+        return;
+      }
+      case 'street':
+        tl.addLabel('flop', '+=0.2');
+        this.set(tl, { phase: 'flop', sayPlayer: '', sayOpponent: '' }, 'flop');
+        ['b0', 'b1', 'b2'].forEach((s, i) => this.fly(tl, s, `flop+=${i * 0.12}`));
+        tl.addLabel('flopFlip', '+=0.1');
+        ['b0', 'b1', 'b2'].forEach((s, i) => this.flip(tl, s, `flopFlip+=${i * 0.12}`));
+        return;
+      case 'runout': {
+        tl.addLabel('runout', '+=0.25');
+        this.set(tl, { sayPlayer: '', sayOpponent: '' }, 'runout');
+        if (e.from === 0) {
+          this.set(tl, { phase: 'flop' }, 'runout');
+          ['b0', 'b1', 'b2'].forEach((s, i) => this.fly(tl, s, `runout+=${i * 0.12}`));
+          tl.addLabel('rflip', '+=0.1');
+          ['b0', 'b1', 'b2'].forEach((s, i) => this.flip(tl, s, `rflip+=${i * 0.12}`));
+        }
+        tl.addLabel('turn', '+=0.45');
+        this.set(tl, { phase: 'turn' }, 'turn');
+        this.fly(tl, 'b3', 'turn');
+        this.flip(tl, 'b3', '+=0.08');
+        tl.addLabel('river', '+=0.6'); // a beat longer for suspense
+        this.set(tl, { phase: 'river' }, 'river');
+        this.fly(tl, 'b4', 'river');
+        this.flip(tl, 'b4', '+=0.15');
+        return;
+      }
+      case 'showdown':
+        tl.addLabel('showdown', '+=0.5');
+        this.set(tl, { phase: 'showdown' }, 'showdown');
+        this.cue(tl, 'reveal', 'showdown');
+        this.flip(tl, 'o0', 'showdown');
+        this.flip(tl, 'o1', 'showdown+=0.1');
+        tl.to(this.all('[data-label]'), { autoAlpha: 1, duration: 0.25 }, '+=0.1');
+        return;
+      case 'award':
+        this.award(tl, e.result, before);
+        return;
+    }
+  }
 
-    // Two halves so front and back are never visible together, even where
-    // backface-visibility is flaky: swap faces exactly at 90°.
-    const flip = (slot: string, at: gsap.Position) => {
-      const el = cards.get(slot);
-      if (!el) return;
-      const inner = el.querySelector('.card-inner');
-      const back = el.querySelector('.card-back');
-      const front = el.querySelector('.card-front');
-      const half = R ? 0.001 : 0.18;
-      const sub = gsap.timeline();
-      sub
-        .to(inner, { rotationY: 90, duration: half, ease: 'power2.in' })
-        .set(back, { autoAlpha: 0 })
-        .set(front, { autoAlpha: 1 })
-        .to(inner, { rotationY: 180, duration: half, ease: 'power2.out' });
-      if (!R) sub.to(el, { scale: 1.08, duration: half, yoyo: true, repeat: 1, ease: 'sine.inOut' }, 0);
-      sub.call(() => sound.play('flip', 0.7), undefined, 0);
-      tl.add(sub, at);
-    };
-
-    // Deal hole cards one by one
-    DEAL_ORDER.forEach((s, i) => fly(s, 0.1 + i * 0.14));
-    tl.addLabel('holeFlip', '+=0.15');
-    flip('p0', 'holeFlip');
-    flip('p1', 'holeFlip+=0.12');
-
-    // Flop
-    tl.addLabel('flop', '+=0.35');
-    phase('flop', 'flop');
-    ['b0', 'b1', 'b2'].forEach((s, i) => fly(s, `flop+=${i * 0.12}`));
-    tl.addLabel('flopFlip', '+=0.1');
-    ['b0', 'b1', 'b2'].forEach((s, i) => flip(s, `flopFlip+=${i * 0.12}`));
-
-    // Turn
-    tl.addLabel('turn', '+=0.45');
-    phase('turn', 'turn');
-    fly('b3', 'turn');
-    flip('b3', '+=0.08');
-
-    // River (a beat longer for suspense)
-    tl.addLabel('river', '+=0.6');
-    phase('river', 'river');
-    fly('b4', 'river');
-    flip('b4', '+=0.15');
-
-    // Showdown
-    tl.addLabel('showdown', '+=0.5');
-    phase('showdown', 'showdown');
-    cue('reveal', 'showdown');
-    flip('o0', 'showdown');
-    flip('o1', 'showdown+=0.1');
-    tl.to(this.all('[data-label]'), { autoAlpha: 1, duration: 0.25 }, '+=0.1');
-
-    // Hand complete: emphasise the featured five, dim the rest
+  private award(tl: Tl, r: Extract<GameEvent, { t: 'award' }>['result'], before: TableView) {
+    const R = this.motion.reduced;
+    const fx = TIER_FX[r.tier];
+    const stage = this.stage();
     tl.addLabel('hand', '+=0.25');
-    const featured = new Set(result.featuredHand.cards.map((c) => c.id));
-    const hi = cardEls.filter((el) => featured.has(el.dataset.cardId ?? ''));
-    const lo = cardEls.filter((el) => !featured.has(el.dataset.cardId ?? ''));
-    tl.to(lo, { autoAlpha: 0.4, duration: 0.3 }, 'hand');
-    tl.to(hi, { y: R ? 0 : -10, duration: 0.3, ease: 'back.out(2)', stagger: 0.05 }, 'hand');
-    tl.to(hi.map((el) => el.querySelector('.card-glow')).filter(Boolean), { autoAlpha: 1, duration: 0.3, stagger: 0.05 }, 'hand');
-    cue(result.tier >= 4 ? 'handLegendary' : result.tier >= 2 ? 'handMajor' : 'handMinor', 'hand');
+    this.set(tl, { phase: 'result' }, 'hand');
 
+    // Emphasise the featured five, dim the rest.
+    if (r.featuredHand) {
+      const featured = new Set(r.featuredHand.cards.map((c) => c.id));
+      const cards = this.all('[data-card]');
+      const hi = cards.filter((el) => featured.has(el.dataset.cardId ?? ''));
+      const lo = cards.filter((el) => !featured.has(el.dataset.cardId ?? ''));
+      tl.to(lo, { autoAlpha: 0.4, duration: 0.3 }, 'hand');
+      tl.to(hi, { y: R ? 0 : -10, duration: 0.3, ease: 'back.out(2)', stagger: 0.05 }, 'hand');
+      tl.to(hi.map((el) => el.querySelector('.card-glow')).filter(Boolean), { autoAlpha: 1, duration: 0.3, stagger: 0.05 }, 'hand');
+      this.cue(tl, r.tier >= 4 ? 'handLegendary' : r.tier >= 2 ? 'handMajor' : 'handMinor', 'hand');
+    }
     const banner = this.one('[data-banner]');
     if (banner) {
-      tl.set(banner, { scale: R ? 1 : 0.6 + result.tier * 0.05 }, 'hand+=0.15');
+      tl.set(banner, { scale: R ? 1 : 0.6 + r.tier * 0.05 }, 'hand+=0.15');
       tl.to(banner, { autoAlpha: 1, scale: 1, duration: R ? 0.15 : 0.4, ease: 'back.out(2.2)' }, '<');
     }
     if (!R) {
       if (fx.flash > 0) this.flash(tl, fx.flash, 'hand+=0.15');
       if (fx.shake > 0) this.shake(tl, stage, fx.shake, 'hand+=0.15');
-      if (fx.particles > 0) this.burst(tl, fx.particles, banner ?? stage, rand, result.tier, 'hand+=0.15');
+      if (fx.particles > 0) this.burst(tl, fx.particles, banner ?? stage, r.tier, 'hand+=0.15');
     }
-    tl.addLabel('handEnd', `hand+=${0.4 + fx.hold}`);
+    tl.addLabel('handEnd', `hand+=${0.4 + (r.featuredHand ? fx.hold : 0.5)}`);
     if (banner) tl.to(banner, { autoAlpha: 0, scale: R ? 1 : 1.1, duration: 0.25 }, 'handEnd');
 
-    // Attack → hit → HP → KO
-    const atk = result.attack;
-    if (atk) {
-      tl.addLabel('attack', 'handEnd+=0.1');
-      phase('attack', 'attack');
-      cue('attack', 'attack');
-      const hpEl = this.one(`[data-hp="${atk.target}"]`);
+    // Pot → winner(s)
+    tl.addLabel('pay', 'handEnd+=0.15');
+    this.cue(tl, 'chips', 'pay');
+    const winners: Side[] = r.winner === 'tie' ? ['player', 'opponent'] : [r.winner];
+    const gain = (s: Side) => (r.winner === 'tie' ? r.committed[s] : r.pot);
+    for (const s of winners) {
+      this.chips(tl, 'pot', s, 'pay');
+      this.num(tl, hpKey(s), before[hpKey(s)], before[hpKey(s)] + gain(s), 0.5, 'pay+=0.25');
+      const pop = this.one(`[data-gain="${s}"]`);
+      if (pop) {
+        tl.set(pop, { y: 0, autoAlpha: 1, scale: R ? 1 : 1.4 }, 'pay+=0.3');
+        tl.to(pop, { scale: 1, duration: 0.2 }, 'pay+=0.3');
+        tl.to(pop, { y: R ? 0 : -20, autoAlpha: 0, duration: 0.5 }, 'pay+=1');
+      }
+    }
+    this.num(tl, 'pot', before.pot, 0, 0.5, 'pay+=0.25');
+
+    // Hand bonus: attack the loser
+    if (r.winner !== 'tie' && r.bonus > 0) {
+      const target = other(r.winner);
+      tl.addLabel('attack', 'pay+=0.8');
+      this.cue(tl, 'attack', 'attack');
+      const hpEl = this.one(`[data-hp="${target}"]`);
       const proj = this.one('[data-projectile]');
-      const from = this.one(`[data-avatar="${atk.attacker}"]`);
+      const from = this.one(`[data-avatar="${r.winner}"]`);
       if (!R && proj && hpEl && from) {
         const a = centerOf(from, stage);
         const b = centerOf(hpEl, stage);
         const angle = (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
-        tl.set(proj, { x: a.x, y: a.y, rotation: angle, scale: 0.6 + result.tier * 0.15, autoAlpha: 1 }, 'attack');
+        tl.set(proj, { x: a.x, y: a.y, rotation: angle, scale: 0.6 + r.tier * 0.15, autoAlpha: 1 }, 'attack');
         tl.to(proj, { x: b.x, y: b.y, duration: 0.45, ease: 'power2.in' }, '>');
         tl.set(proj, { autoAlpha: 0 }, '>');
       }
       tl.addLabel('hit', '>');
-      cue('hit', 'hit');
-      const seat = this.one(`[data-seat="${atk.target}"]`);
-      if (!R && seat) this.shake(tl, seat, 6 + result.tier * 2, 'hit');
+      this.cue(tl, 'hit', 'hit');
+      const seat = this.one(`[data-seat="${target}"]`);
+      if (!R && seat) this.shake(tl, seat, 6 + r.tier * 2, 'hit');
       if (!R) this.flash(tl, 0.15, 'hit');
-      const dmg = this.one(`[data-dmg="${atk.target}"]`);
+      const dmg = this.one(`[data-dmg="${target}"]`);
       if (dmg) {
         tl.set(dmg, { y: 0, scale: R ? 1 : 1.6, autoAlpha: 1 }, 'hit');
         tl.to(dmg, { scale: 1, duration: 0.2, ease: 'power2.out' }, 'hit');
         tl.to(dmg, { y: R ? 0 : -24, autoAlpha: 0, duration: 0.5, ease: 'power1.in' }, 'hit+=0.7');
       }
-      const key = atk.target === 'player' ? 'playerHp' : 'opponentHp';
-      const hp = { v: atk.hp.before };
-      tl.to(
-        hp,
-        {
-          v: atk.hp.after,
-          duration: R ? 0.3 : 0.7,
-          ease: 'power2.out',
-          onUpdate: () => store.set({ [key]: Math.round(hp.v) } as Partial<PresentationState>),
-        },
-        'hit',
-      );
-
-      if (atk.hp.eliminated) this.knockOut(tl, atk.target, cue, R);
+      const tgtAfter = r[target].after.hp;
+      this.num(tl, hpKey(target), tgtAfter + r.bonus, tgtAfter, R ? 0.3 : 0.7, 'hit');
     }
 
-    // Survivors counter
-    if (result.survivors.after !== result.survivors.before) {
-      const sv = { v: result.survivors.before };
-      tl.to(sv, {
-        v: result.survivors.after,
-        duration: R ? 0.2 : 0.6,
-        ease: 'power1.out',
-        onUpdate: () => store.set({ survivors: Math.round(sv.v) }),
-      }, '+=0.1');
+    if (r.eliminated) {
+      const side = r.eliminated;
+      tl.addLabel('ko', '+=0.25');
+      this.cue(tl, 'ko', 'ko');
+      const avatar = this.one(`[data-avatar="${side}"]`);
+      const stamp = this.one(`[data-ko="${side}"]`);
+      if (avatar) tl.to(avatar, { autoAlpha: 0.3, y: R ? 0 : 8, rotation: R ? 0 : -8, duration: 0.5, ease: 'power2.in' }, 'ko');
+      if (stamp) {
+        tl.set(stamp, { scale: R ? 1 : 2.4, rotation: -12 }, 'ko');
+        tl.to(stamp, { autoAlpha: 1, scale: 1, duration: R ? 0.15 : 0.35, ease: 'power4.in' }, 'ko+=0.2');
+      }
+      if (!R) this.shake(tl, stage, 10, 'ko+=0.55');
     }
-    if (result.statusAfter === 'won') cue('win');
-    if (result.statusAfter === 'lost') cue('lose');
-    tl.to({}, { duration: 0.2 }); // tail so the last frame is visible
+
+    if (r.survivors.after !== r.survivors.before) {
+      this.num(tl, 'survivors', r.survivors.before, r.survivors.after, R ? 0.2 : 0.6, '+=0.1');
+    }
+    if (r.statusAfter === 'won') this.cue(tl, 'win');
+    if (r.statusAfter === 'lost') this.cue(tl, 'lose');
   }
 
   // ---- helpers ---------------------------------------------------------
 
-  private knockOut(
-    tl: gsap.core.Timeline,
-    side: Side,
-    cue: (id: SoundId, at?: gsap.Position) => gsap.core.Timeline,
-    R: boolean,
-  ) {
-    tl.addLabel('ko', '+=0.25');
-    cue('ko', 'ko');
-    const avatar = this.one(`[data-avatar="${side}"]`);
-    const stamp = this.one(`[data-ko="${side}"]`);
-    if (avatar) tl.to(avatar, { autoAlpha: 0.3, y: R ? 0 : 8, rotation: R ? 0 : -8, duration: 0.5, ease: 'power2.in' }, 'ko');
-    if (stamp) {
-      tl.set(stamp, { scale: R ? 1 : 2.4, rotation: -12 }, 'ko');
-      tl.to(stamp, { autoAlpha: 1, scale: 1, duration: R ? 0.15 : 0.35, ease: 'power4.in' }, 'ko+=0.2');
-    }
-    if (!R) this.shake(tl, this.stage(), 10, 'ko+=0.55');
+  private set(tl: Tl, patch: Partial<PresentationState>, at?: gsap.Position) {
+    tl.call(() => this.opts.store.set(patch), undefined, at);
   }
 
-  private shake(tl: gsap.core.Timeline, el: Element, amp: number, at: gsap.Position) {
+  private cue(tl: Tl, id: SoundId, at?: gsap.Position) {
+    tl.call(() => this.opts.sound.play(id), undefined, at);
+  }
+
+  /** Tween a number in the store (HP, pot, survivors) so text and bars stay in sync. */
+  private num(tl: Tl, key: 'playerHp' | 'opponentHp' | 'pot' | 'survivors', from: number, to: number, duration: number, at: gsap.Position) {
+    if (from === to) return;
+    const o = { v: from };
+    const { store } = this.opts;
+    tl.to(
+      o,
+      {
+        v: to,
+        duration: this.motion.reduced ? Math.min(duration, 0.25) : duration,
+        ease: 'power2.out',
+        onStart: () => store.set({ [key]: from } as Partial<PresentationState>),
+        onUpdate: () => store.set({ [key]: Math.round(o.v) } as Partial<PresentationState>),
+      },
+      at,
+    );
+  }
+
+  private fly(tl: Tl, slot: string, at: gsap.Position) {
+    const el = this.one(`[data-card="${slot}"]`);
+    const off = this.deckOffset.get(slot);
+    if (!el || !off) return;
+    if (this.motion.reduced) {
+      tl.set(el, { x: 0, y: 0, rotation: 0 }, at).to(el, { autoAlpha: 1, duration: 0.15 }, '<');
+    } else {
+      tl.set(el, { ...off, rotation: (this.rand() - 0.5) * 30, autoAlpha: 1 }, at).to(
+        el,
+        { x: 0, y: 0, rotation: 0, duration: 0.45, ease: 'power3.out' },
+        '<',
+      );
+    }
+    this.cue(tl, 'deal', '<');
+  }
+
+  /**
+   * Two halves so front and back are never visible together, even where
+   * backface-visibility is flaky: swap faces exactly at 90°.
+   */
+  private flip(tl: Tl, slot: string, at: gsap.Position) {
+    const el = this.one(`[data-card="${slot}"]`);
+    if (!el) return;
+    const half = this.motion.reduced ? 0.001 : 0.18;
+    const sub = gsap.timeline();
+    sub
+      .to(el.querySelector('.card-inner'), { rotationY: 90, duration: half, ease: 'power2.in' })
+      .set(el.querySelector('.card-back'), { autoAlpha: 0 })
+      .set(el.querySelector('.card-front'), { autoAlpha: 1 })
+      .to(el.querySelector('.card-inner'), { rotationY: 180, duration: half, ease: 'power2.out' });
+    if (!this.motion.reduced) sub.to(el, { scale: 1.08, duration: half, yoyo: true, repeat: 1, ease: 'sine.inOut' }, 0);
+    sub.call(() => this.opts.sound.play('flip', 0.7), undefined, 0);
+    tl.add(sub, at);
+  }
+
+  /** A few chip tokens travelling between a seat and the pot. */
+  private chips(tl: Tl, from: Side | 'pot', to: Side | 'pot', at: string) {
+    const anchor = (s: Side | 'pot') => this.one(s === 'pot' ? '[data-pot]' : `[data-avatar="${s}"]`);
+    const a = anchor(from);
+    const b = anchor(to);
+    const stage = this.stage();
+    if (!a || !b) return;
+    const p = centerOf(a, stage);
+    const q = centerOf(b, stage);
+    const pool = this.all('[data-chip]');
+    const n = this.motion.reduced ? 1 : 3;
+    // Use a different slice of the pool for each direction so overlapping flights don't fight.
+    const offset = from === 'opponent' || to === 'opponent' ? 4 : 0;
+    for (let i = 0; i < n; i++) {
+      const chip = pool[(offset + i) % pool.length];
+      if (!chip) continue;
+      const jx = (this.rand() - 0.5) * 16;
+      const jy = (this.rand() - 0.5) * 10;
+      tl.set(chip, { x: p.x + jx, y: p.y + jy, scale: 1, autoAlpha: 1 }, `${at}+=${i * 0.06}`);
+      tl.to(chip, { x: q.x + jx, y: q.y + jy, duration: this.motion.reduced ? 0.15 : 0.4, ease: 'power2.inOut' }, '<');
+      tl.to(chip, { autoAlpha: 0, scale: 0.6, duration: 0.12 }, '>');
+    }
+    this.cue(tl, 'chips', at);
+  }
+
+  private shake(tl: Tl, el: Element | null, amp: number, at: gsap.Position) {
+    if (!el) return;
     tl.to(
       el,
       {
@@ -323,44 +490,24 @@ export class Director implements Presenter {
     );
   }
 
-  private flash(tl: gsap.core.Timeline, strength: number, at: gsap.Position) {
+  private flash(tl: Tl, strength: number, at: gsap.Position) {
     const el = this.one('[data-flash]');
     if (!el) return;
     tl.set(el, { autoAlpha: strength }, at).to(el, { autoAlpha: 0, duration: 0.35, ease: 'power2.out' }, '>');
   }
 
-  private burst(tl: gsap.core.Timeline, count: number, origin: Element, rand: () => number, tier: number, at: gsap.Position) {
-    const stage = this.stage();
-    const c = centerOf(origin, stage);
+  private burst(tl: Tl, count: number, origin: Element, tier: number, at: gsap.Position) {
+    const c = centerOf(origin, this.stage());
     const ps = this.all('[data-particle]').slice(0, count);
     ps.forEach((p, i) => {
-      const angle = (i / ps.length) * Math.PI * 2 + rand() * 0.5;
-      const dist = 60 + rand() * (50 + tier * 25);
-      tl.set(p, { x: c.x, y: c.y, scale: 0.5 + rand() * (0.6 + tier * 0.2), autoAlpha: 1 }, at);
+      const angle = (i / ps.length) * Math.PI * 2 + this.rand() * 0.5;
+      const dist = 60 + this.rand() * (50 + tier * 25);
+      tl.set(p, { x: c.x, y: c.y, scale: 0.5 + this.rand() * (0.6 + tier * 0.2), autoAlpha: 1 }, at);
       tl.to(
         p,
-        { x: c.x + Math.cos(angle) * dist, y: c.y + Math.sin(angle) * dist, autoAlpha: 0, duration: 0.6 + rand() * 0.4, ease: 'power2.out' },
+        { x: c.x + Math.cos(angle) * dist, y: c.y + Math.sin(angle) * dist, autoAlpha: 0, duration: 0.6 + this.rand() * 0.4, ease: 'power2.out' },
         '<',
       );
-    });
-  }
-
-  private complete(tl: gsap.core.Timeline, result: RoundResult) {
-    if (this.tl !== tl) return;
-    this.tl = null;
-    this.finalize(result);
-  }
-
-  /** Make the store match the decided result regardless of how playback ended. */
-  private finalize(result: RoundResult) {
-    this.opts.store.set({
-      round: result.round,
-      phase: 'result',
-      playing: false,
-      settled: true,
-      playerHp: result.player.after.hp,
-      opponentHp: result.opponent.after.hp,
-      survivors: result.survivors.after,
     });
   }
 

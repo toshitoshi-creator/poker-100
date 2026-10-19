@@ -6,19 +6,23 @@ import type { GameState } from './logic/game';
 import { Director } from './presentation/director';
 import { prefersReducedMotion, watchReducedMotion } from './presentation/motion';
 import { createStore, useStore, type PresentationState } from './presentation/store';
+import { currentLog, idleView } from './presentation/view';
 import { Controls } from './ui/Controls';
 import { Hud } from './ui/Hud';
 import { Table } from './ui/Table';
 
-function idleView(g: GameState): PresentationState {
+function initialPresentation(g: GameState): PresentationState {
+  const v = idleView(g);
   return {
-    phase: 'idle',
-    playerHp: g.player.hp,
-    opponentHp: g.opponent.hp,
-    survivors: g.survivors,
-    round: g.round,
+    phase: v.phase,
+    playerHp: v.playerHp,
+    opponentHp: v.opponentHp,
+    pot: 0,
+    survivors: v.survivors,
+    sayPlayer: '',
+    sayOpponent: '',
+    round: v.round,
     playing: false,
-    settled: false,
   };
 }
 
@@ -35,7 +39,7 @@ export function readSeedFromUrl(): number | null {
 export function App({ seed: initialSeed }: { seed?: number }) {
   const [seed, setSeed] = useState(() => initialSeed ?? readSeedFromUrl() ?? randomSeed());
   const controller = useMemo(() => new GameController(seed), []); // eslint-disable-line react-hooks/exhaustive-deps
-  const store = useMemo(() => createStore<PresentationState>(idleView(controller.getState())), [controller]);
+  const store = useMemo(() => createStore<PresentationState>(initialPresentation(controller.getState())), [controller]);
   const sound = useMemo(() => {
     const bus = createSoundBus();
     if (typeof Audio !== 'undefined') registerAudioFiles(bus, SOUND_FILES);
@@ -48,7 +52,6 @@ export function App({ seed: initialSeed }: { seed?: number }) {
   const [speed, setSpeed] = useState(1);
   const [muted, setMuted] = useState(false);
   const playing = useStore(store, (s) => s.playing);
-  const settled = useStore(store, (s) => s.settled);
 
   useLayoutEffect(() => {
     const d = new Director({ root: stageRef.current!, store, sound, motion: { reduced, speed } });
@@ -61,22 +64,25 @@ export function App({ seed: initialSeed }: { seed?: number }) {
     };
   }, [controller, store, sound]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // New round rendered → play it. The result is already final in `game`.
+  // Every logic step is already final in `game`; play just the events it produced.
   useLayoutEffect(() => {
-    if (game.lastRound) directorRef.current?.play(game.lastRound);
-    else store.set(idleView(game));
-  }, [game.lastRound]); // eslint-disable-line react-hooks/exhaustive-deps
+    const d = directorRef.current;
+    if (!d) return;
+    if (game.lastEvents.length) {
+      const log = currentLog(game);
+      d.play(log, log.length - game.lastEvents.length);
+    } else {
+      d.show(idleView(game));
+    }
+  }, [game]);
 
   useEffect(() => watchReducedMotion(setReduced), []);
   useEffect(() => directorRef.current?.setMotion({ reduced, speed }), [reduced, speed]);
   useEffect(() => sound.setMuted(muted), [sound, muted]);
 
-  const over = game.status !== 'playing' && settled;
-  const dealLabel = !game.lastRound
-    ? '▶ 配る'
-    : game.lastRound.attack?.hp.eliminated && game.lastRound.attack.target === 'opponent'
-      ? '▶ 次の対戦相手'
-      : '▶ 次のラウンド';
+  const over = game.status !== 'playing' && !playing;
+  const mode = over ? 'over' : playing ? 'playing' : game.hand ? 'decide' : 'idle';
+  const dealLabel = !game.lastRound ? '▶ 配る' : game.lastRound.eliminated === 'opponent' ? '▶ 次の対戦相手' : '▶ 次のラウンド';
 
   const restart = () => {
     const s = randomSeed();
@@ -86,20 +92,23 @@ export function App({ seed: initialSeed }: { seed?: number }) {
 
   return (
     <div className={`app${reduced ? ' is-reduced' : ''}`}>
-      <Hud store={store} />
-      <Table ref={stageRef} game={game} store={store} />
-      <Controls
-        playing={playing}
-        canDeal={game.status === 'playing'}
-        canReplay={!!game.lastRound}
-        dealLabel={dealLabel}
+      <Hud
+        store={store}
         speed={speed}
         muted={muted}
+        onSpeed={() => setSpeed((v) => (v === 1 ? 2 : 1))}
+        onMute={() => setMuted((m) => !m)}
+      />
+      <Table ref={stageRef} game={game} store={store} />
+      <Controls
+        mode={mode}
+        legal={mode === 'decide' ? controller.legal() : []}
+        dealLabel={dealLabel}
+        canReplay={!game.hand && game.lastLog.length > 0}
         onDeal={() => controller.deal()}
         onSkip={() => controller.skip()}
         onReplay={() => controller.replay()}
-        onSpeed={() => setSpeed((v) => (v === 1 ? 2 : 1))}
-        onMute={() => setMuted((m) => !m)}
+        onAct={(a) => controller.act(a)}
       />
       <footer className="seed">seed {seed}</footer>
       {over && (
