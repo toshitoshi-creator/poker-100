@@ -1,4 +1,3 @@
-import { forwardRef } from 'react';
 import { anteFor } from '../logic/combat';
 import type { GameState } from '../logic/game';
 import { HAND_INFO } from '../logic/handEvaluator';
@@ -24,7 +23,7 @@ function Pot({ store, ante }: { store: Store<PresentationState>; ante: number })
 }
 
 /** Pure layout. All motion is applied by the Director through data-* hooks. */
-export const Table = forwardRef<HTMLDivElement, Props>(function Table({ game, store }, ref) {
+export function Table({ game, store }: Props) {
   // During a hand: its cards. Between hands: the finished hand stays on the table.
   const result = game.hand ? null : game.lastRound;
   const deal = game.hand?.deal ?? result?.deal ?? null;
@@ -48,7 +47,7 @@ export const Table = forwardRef<HTMLDivElement, Props>(function Table({ game, st
   const tier = result?.tier ?? 0;
 
   return (
-    <div className="stage" data-stage ref={ref}>
+    <div className="stage" data-stage>
       <Seat side="opponent" fighter={opponent} deal={deal} round={round} result={result} store={store} />
 
       <section className="board-area">
@@ -91,4 +90,4 @@ export const Table = forwardRef<HTMLDivElement, Props>(function Table({ game, st
       </div>
     </div>
   );
-});
+}

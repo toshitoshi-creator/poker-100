@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createSoundBus, registerAudioFiles } from './audio/soundBus';
 import { SOUND_FILES } from './audio/soundMap';
 import { GameController } from './game/controller';
@@ -7,6 +7,7 @@ import { Director } from './presentation/director';
 import { prefersReducedMotion, watchReducedMotion } from './presentation/motion';
 import { createStore, useStore, type PresentationState } from './presentation/store';
 import { currentLog, idleView } from './presentation/view';
+import { Arena } from './ui/Arena';
 import { Controls } from './ui/Controls';
 import { Hud } from './ui/Hud';
 import { Table } from './ui/Table';
@@ -23,6 +24,7 @@ function initialPresentation(g: GameState): PresentationState {
     sayOpponent: '',
     round: v.round,
     playing: false,
+    arena: 'lobby',
   };
 }
 
@@ -46,15 +48,16 @@ export function App({ seed: initialSeed }: { seed?: number }) {
     return bus;
   }, []);
   const game = useSyncExternalStore(controller.subscribe, controller.getState);
-  const stageRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const directorRef = useRef<Director | null>(null);
   const [reduced, setReduced] = useState(prefersReducedMotion);
   const [speed, setSpeed] = useState(1);
   const [muted, setMuted] = useState(false);
   const playing = useStore(store, (s) => s.playing);
+  const arena = useStore(store, (s) => s.arena);
 
   useLayoutEffect(() => {
-    const d = new Director({ root: stageRef.current!, store, sound, motion: { reduced, speed } });
+    const d = new Director({ root: bodyRef.current!, store, sound, motion: { reduced, speed } });
     directorRef.current = d;
     controller.attach(d);
     return () => {
@@ -80,7 +83,10 @@ export function App({ seed: initialSeed }: { seed?: number }) {
   useEffect(() => directorRef.current?.setMotion({ reduced, speed }), [reduced, speed]);
   useEffect(() => sound.setMuted(muted), [sound, muted]);
 
-  const over = game.status !== 'playing' && !playing;
+  const join = useCallback(() => controller.deal(), [controller]);
+  const closeArena = useCallback(() => directorRef.current?.closeArena(controller.getState().roster.you), [controller]);
+
+  const over = game.status !== 'playing' && !playing && arena === 'hidden';
   const mode = over ? 'over' : playing ? 'playing' : game.hand ? 'decide' : 'idle';
   const dealLabel = !game.lastRound ? '▶ 配る' : game.lastRound.eliminated === 'opponent' ? '▶ 次の対戦相手' : '▶ 次のラウンド';
 
@@ -98,8 +104,10 @@ export function App({ seed: initialSeed }: { seed?: number }) {
         muted={muted}
         onSpeed={() => setSpeed((v) => (v === 1 ? 2 : 1))}
         onMute={() => setMuted((m) => !m)}
+        onStandings={() => (arena === 'open' ? directorRef.current?.closeArena(game.roster.you) : directorRef.current?.openArena(game.roster.you))}
       />
-      <Table ref={stageRef} game={game} store={store} />
+      <div className="app-body" ref={bodyRef}>
+      <Table game={game} store={store} />
       <Controls
         mode={mode}
         legal={mode === 'decide' ? controller.legal() : []}
@@ -110,6 +118,13 @@ export function App({ seed: initialSeed }: { seed?: number }) {
         onReplay={() => controller.replay()}
         onAct={(a) => controller.act(a)}
       />
+      <Arena
+        game={game}
+        mode={arena}
+        onJoin={join}
+        onClose={closeArena}
+      />
+      </div>
       <footer className="seed">seed {seed}</footer>
       {over && (
         <div className="result-overlay" role="dialog" aria-label="結果">
@@ -127,6 +142,9 @@ export function App({ seed: initialSeed }: { seed?: number }) {
                 </p>
               </>
             )}
+            <button className="btn btn--ghost" onClick={() => directorRef.current?.openArena(game.roster.you)}>
+              100人の結果を見る
+            </button>
             <button className="btn btn--primary" onClick={restart}>
               もう一度
             </button>

@@ -15,19 +15,23 @@ interface Props {
   muted: boolean;
   onSpeed(): void;
   onMute(): void;
+  onStandings(): void;
 }
 
-export function Hud({ store, speed, muted, onSpeed, onMute }: Props) {
+export function Hud({ store, speed, muted, onSpeed, onMute, onStandings }: Props) {
   const survivors = useStore(store, (s) => s.survivors);
   const phase = useStore(store, (s) => s.phase);
   const activeIdx = STEPS.findIndex((s) => s.key.includes(phase));
   return (
     <header className="hud">
-      <div className="hud-survivors">
+      <button className="hud-survivors" onClick={onStandings} aria-label="100人の生存状況を見る" data-testid="standings">
         <span className="hud-cap">生存者</span>
         <b data-testid="survivors">{survivors}</b>
         <span className="hud-cap">/{TOTAL_PLAYERS}</span>
-      </div>
+        <span className="hud-grid" aria-hidden>
+          ▦
+        </span>
+      </button>
       <ol className="hud-steps">
         {STEPS.map((s, i) => (
           <li key={s.label} className={i === activeIdx ? 'is-active' : i < activeIdx ? 'is-done' : ''}>

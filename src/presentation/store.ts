@@ -44,4 +44,6 @@ export interface PresentationState {
   /** Round id currently on screen (0 = none yet). */
   round: number;
   playing: boolean;
+  /** The 100-player overview: lobby before the first hand, open when the player checks standings. */
+  arena: 'hidden' | 'lobby' | 'open';
 }

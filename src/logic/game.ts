@@ -3,6 +3,7 @@ import { anteFor, effectTier, handBonus, type EffectTier } from './combat';
 import { dealHoldem, type HoldemDeal } from './dealer';
 import { compareHands, evaluateBest, type HandResult } from './handEvaluator';
 import type { Fighter } from './hp';
+import { shuffle } from './deck';
 import { deriveSeed, mulberry32, randInt } from './rng';
 
 export const TOTAL_PLAYERS = 100;
@@ -73,12 +74,28 @@ export interface RoundResult {
   eliminated: Side | null;
   player: { before: Fighter; after: Fighter };
   opponent: { before: Fighter; after: Fighter };
-  survivors: { before: number; after: number; othersEliminated: number };
+  /** `fallen`: every seat eliminated this round (this table's loser included). */
+  survivors: { before: number; after: number; othersEliminated: number; fallen: number[] };
   statusAfter: GameStatus;
+}
+
+/** All 100 seats. `out[i]` is the round seat i was eliminated in, or null while alive. */
+export interface Roster {
+  you: number;
+  out: (number | null)[];
+}
+
+export const seatName = (seat: number) => `No.${String(seat + 1).padStart(3, '0')}`;
+
+export function aliveSeats(r: Roster): number[] {
+  const a: number[] = [];
+  r.out.forEach((o, i) => o === null && a.push(i));
+  return a;
 }
 
 export interface GameState {
   seed: number;
+  roster: Roster;
   round: number;
   player: Fighter;
   opponent: Fighter;
@@ -93,18 +110,23 @@ export interface GameState {
   lastEvents: GameEvent[];
 }
 
-function makeOpponent(seed: number, round: number): Fighter {
+function makeOpponent(seed: number, round: number, roster: Roster): Fighter {
   const rng = mulberry32(deriveSeed(seed, round, 0xa11ce));
-  const no = randInt(rng, 2, TOTAL_PLAYERS);
-  return { id: `opp-${round}-${no}`, name: `No.${String(no).padStart(3, '0')}`, hp: OPPONENT_MAX_HP, maxHp: OPPONENT_MAX_HP };
+  const pool = aliveSeats(roster).filter((i) => i !== roster.you);
+  const seat = pool[Math.floor(rng() * pool.length)] ?? (roster.you + 1) % TOTAL_PLAYERS;
+  return { id: `seat-${seat}`, name: seatName(seat), seat, hp: OPPONENT_MAX_HP, maxHp: OPPONENT_MAX_HP };
 }
 
 export function createGame(seed: number): GameState {
+  const s = seed >>> 0;
+  const you = randInt(mulberry32(deriveSeed(s, 0x5ea7)), 0, TOTAL_PLAYERS - 1);
+  const roster: Roster = { you, out: Array.from({ length: TOTAL_PLAYERS }, () => null) };
   return {
-    seed: seed >>> 0,
+    seed: s,
+    roster,
     round: 0,
-    player: { id: 'you', name: 'YOU', hp: PLAYER_MAX_HP, maxHp: PLAYER_MAX_HP },
-    opponent: makeOpponent(seed >>> 0, 0),
+    player: { id: 'you', name: 'YOU', seat: you, hp: PLAYER_MAX_HP, maxHp: PLAYER_MAX_HP },
+    opponent: makeOpponent(s, 0, roster),
     survivors: TOTAL_PLAYERS,
     status: 'playing',
     hand: null,
@@ -292,11 +314,23 @@ function settle(w: Work, folder: Side | null): GameState {
   const opponent = grow(state.opponent, hp.opponent);
   const eliminated: Side | null = player.hp === 0 ? 'player' : opponent.hp === 0 ? 'opponent' : null;
 
-  // Other tables keep playing: up to 3 eliminations elsewhere each round.
+  // This table's loser, then up to 3 eliminations at other tables.
+  const out = [...state.roster.out];
+  const fallen: number[] = [];
+  if (eliminated) {
+    const seat = eliminated === 'player' ? state.roster.you : state.opponent.seat;
+    out[seat] = hand.round;
+    fallen.push(seat);
+  }
   const rng = mulberry32(deriveSeed(hand.seed, 0x07e5));
-  const others = Math.max(0, state.survivors - 2);
-  const othersEliminated = Math.min(others, randInt(rng, 0, 3));
-  const survivorsAfter = state.survivors - othersEliminated - (eliminated ? 1 : 0);
+  const others = aliveSeats(state.roster).filter((i) => i !== state.roster.you && i !== state.opponent.seat);
+  const othersEliminated = Math.min(others.length, randInt(rng, 0, 3));
+  for (const seat of shuffle(others, rng).slice(0, othersEliminated)) {
+    out[seat] = hand.round;
+    fallen.push(seat);
+  }
+  const roster: Roster = { ...state.roster, out };
+  const survivorsAfter = aliveSeats(roster).length;
   const status: GameStatus = eliminated === 'player' ? 'lost' : survivorsAfter <= 1 ? 'won' : 'playing';
 
   const result: RoundResult = {
@@ -316,16 +350,17 @@ function settle(w: Work, folder: Side | null): GameState {
     eliminated,
     player: { before: start.player, after: player },
     opponent: { before: start.opponent, after: opponent },
-    survivors: { before: state.survivors, after: survivorsAfter, othersEliminated },
+    survivors: { before: state.survivors, after: survivorsAfter, othersEliminated, fallen },
     statusAfter: status,
   };
   const events: GameEvent[] = [...w.events, { t: 'award', result }];
 
   return {
     ...state,
+    roster,
     player,
     // A knocked-out opponent is replaced by the next challenger.
-    opponent: eliminated === 'opponent' && status === 'playing' ? makeOpponent(state.seed, hand.round) : opponent,
+    opponent: eliminated === 'opponent' && status === 'playing' ? makeOpponent(state.seed, hand.round, roster) : opponent,
     survivors: survivorsAfter,
     status,
     hand: null,

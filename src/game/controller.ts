@@ -47,7 +47,7 @@ export class GameController {
   /** Re-run the last finished hand's presentation. Game state is untouched. */
   replay(): void {
     if (this.state.hand || this.state.lastLog.length === 0) return;
-    this.presenter?.play(this.state.lastLog, 0);
+    this.presenter?.play(this.state.lastLog, 0, { intro: false });
   }
 
   reset(seed: number): void {

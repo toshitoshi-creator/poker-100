@@ -108,6 +108,11 @@ export function viewAt(log: readonly GameEvent[], n: number): TableView {
   return v;
 }
 
+/** Before the very first hand the 100-player lobby is on screen instead of the table. */
+export function isLobby(v: TableView): boolean {
+  return v.round === 0 && !v.dealt;
+}
+
 /** The log currently on the table: the hand in progress, else the last finished one. */
 export function currentLog(g: GameState): GameEvent[] {
   return g.hand?.log ?? g.lastLog;

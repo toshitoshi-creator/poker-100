@@ -4,7 +4,7 @@ import { mulberry32 } from '../logic/rng';
 import type { SoundBus, SoundId } from '../audio/soundBus';
 import type { MotionProfile } from './motion';
 import type { PresentationState, Store } from './store';
-import { reduceView, viewAt, type TableView } from './view';
+import { isLobby, reduceView, viewAt, type TableView } from './view';
 
 /**
  * DOM contract (rendered by ui/Table):
@@ -15,10 +15,16 @@ import { reduceView, viewAt, type TableView } from './view';
  *   [data-seat=side] [data-avatar=side] [data-hp=side] [data-label=side]
  *   [data-ko=side] [data-dmg=side] [data-gain=side]
  *   [data-banner] [data-flash] [data-projectile] [data-particle]×N [data-chip]×N
+ *   [data-arena] > [data-arena-grid] > [data-tile=0..99] (.tile-x)   the 100-player overview
  */
+export interface PlayOptions {
+  /** Zoom from the 100-player lobby into the player's seat before the first deal (default true). */
+  intro?: boolean;
+}
+
 export interface Presenter {
   /** Animate events log[from..] starting from the table as it was after log[0..from). */
-  play(log: readonly GameEvent[], from: number): void;
+  play(log: readonly GameEvent[], from: number, opts?: PlayOptions): void;
   /** Jump straight to a view (no animation). */
   show(view: TableView): void;
   skip(): void;
@@ -54,6 +60,7 @@ type Tl = gsap.core.Timeline;
 
 export class Director implements Presenter {
   private tl: Tl | null = null;
+  private arenaTl: Tl | null = null;
   private final: TableView | null = null;
   private motion: MotionProfile;
   /** Deck position relative to each card slot, measured at snap time. */
@@ -96,13 +103,15 @@ export class Director implements Presenter {
     this.tl = null;
     this.final = null;
     const els = this.all(
-      '[data-seat], [data-avatar], [data-label], [data-ko], [data-dmg], [data-gain], [data-banner], [data-flash], [data-projectile], [data-particle], [data-chip]',
+      '[data-seat], [data-avatar], [data-label], [data-ko], [data-dmg], [data-gain], [data-banner], [data-flash], [data-projectile], [data-particle], [data-chip], [data-arena], [data-arena-grid], [data-tile] .tile-x',
     );
+    this.arenaTl?.kill();
+    this.arenaTl = null;
     if (els.length) gsap.set(els, { clearProps: 'all' });
     gsap.set(this.stage(), { clearProps: 'all' });
   }
 
-  play(log: readonly GameEvent[], from: number): void {
+  play(log: readonly GameEvent[], from: number, opts: PlayOptions = {}): void {
     if (this.tl) this.skip();
     if (from >= log.length) return;
     let view = viewAt(log, from);
@@ -115,6 +124,10 @@ export class Director implements Presenter {
     tl.timeScale(this.motion.speed);
     this.tl = tl;
     this.opts.store.set({ playing: true });
+    if (isLobby(view)) {
+      if (opts.intro !== false) this.intro(tl, start.player.seat);
+      else this.leaveArenaNow();
+    }
     for (let i = from; i < log.length; i++) {
       const next = reduceView(view, log[i]!);
       this.animate(tl, log[i]!, view, next);
@@ -146,7 +159,15 @@ export class Director implements Presenter {
       sayOpponent: v.say.opponent,
     });
 
-    gsap.set(this.stage(), { x: 0, y: 0 });
+    const lobby = isLobby(v);
+    this.arenaTl?.kill();
+    this.arenaTl = null;
+    gsap.set(this.all('[data-arena-grid]'), { x: 0, y: 0, scale: 1, transformOrigin: '0 0' });
+    gsap.set(this.all('[data-arena]'), { autoAlpha: lobby ? 1 : 0 });
+    gsap.set(this.all('[data-arena] .arena-chrome'), { autoAlpha: 1 });
+    this.clearMarks();
+    this.opts.store.set({ arena: lobby ? 'lobby' : 'hidden' });
+    gsap.set(this.stage(), { x: 0, y: 0, scale: 1, autoAlpha: lobby ? 0 : 1 });
     gsap.set(this.all('[data-seat]'), { x: 0, y: 0 });
     gsap.set(this.all('[data-label], [data-dmg], [data-gain], [data-banner], [data-flash], [data-projectile], [data-particle], [data-chip]'), {
       autoAlpha: 0,
@@ -382,6 +403,119 @@ export class Director implements Presenter {
     }
     if (r.statusAfter === 'won') this.cue(tl, 'win');
     if (r.statusAfter === 'lost') this.cue(tl, 'lose');
+  }
+
+  // ---- 100-player arena -------------------------------------------------
+
+  /** Transform that makes `seat`'s tile fill the stage (grid uses transform-origin 0 0). */
+  private seatZoom(seat: number): { x: number; y: number; scale: number } | null {
+    const grid = this.one('[data-arena-grid]');
+    const tile = this.one(`[data-tile="${seat}"]`);
+    const arena = this.one('[data-arena]');
+    if (!grid || !tile || !arena) return null;
+    const prev = { x: gsap.getProperty(grid, 'x'), y: gsap.getProperty(grid, 'y'), scale: gsap.getProperty(grid, 'scale') };
+    gsap.set(grid, { x: 0, y: 0, scale: 1, transformOrigin: '0 0' });
+    const g = grid.getBoundingClientRect();
+    const t = tile.getBoundingClientRect();
+    const a = arena.getBoundingClientRect();
+    gsap.set(grid, prev);
+    if (!t.width) return null;
+    const scale = (a.width * 0.92) / t.width;
+    const tcx = t.left + t.width / 2 - g.left;
+    const tcy = t.top + t.height / 2 - g.top;
+    return { scale, x: a.left + a.width / 2 - g.left - scale * tcx, y: a.top + a.height / 2 - g.top - scale * tcy };
+  }
+
+  /** Lobby → zoom into the player's own screen → the table. */
+  private intro(tl: Tl, seat: number) {
+    const arena = this.one('[data-arena]');
+    const grid = this.one('[data-arena-grid]');
+    const tile = this.one(`[data-tile="${seat}"]`);
+    const stage = this.stage();
+    const z = this.seatZoom(seat);
+    this.set(tl, { arena: 'lobby' });
+    if (this.motion.reduced || !arena || !grid || !z) {
+      tl.to(arena, { autoAlpha: 0, duration: 0.25 });
+      tl.to(stage, { autoAlpha: 1, duration: 0.25 }, '<');
+    } else {
+      tl.addLabel('intro');
+      tl.to(this.all('[data-arena] .arena-chrome'), { autoAlpha: 0, duration: 0.25 }, 'intro');
+      tl.to(tile, { scale: 1.3, duration: 0.18, yoyo: true, repeat: 3, ease: 'sine.inOut' }, 'intro');
+      this.cue(tl, 'reveal', 'intro');
+      tl.to(grid, { ...z, duration: 1.1, ease: 'power3.inOut' }, 'intro+=0.5');
+      tl.to(arena, { autoAlpha: 0, duration: 0.35 }, 'intro+=1.25');
+      tl.set(stage, { scale: 0.9 }, 'intro+=1.25');
+      tl.to(stage, { autoAlpha: 1, scale: 1, duration: 0.45, ease: 'power2.out' }, 'intro+=1.25');
+    }
+    tl.set(grid, { x: 0, y: 0, scale: 1 });
+    tl.set(this.all('[data-arena] .arena-chrome'), { autoAlpha: 1 });
+    this.set(tl, { arena: 'hidden' });
+  }
+
+  /** Undo the × stamp-in tweens (only eliminated tiles have a visible mark). */
+  private clearMarks() {
+    const marks = this.all('[data-tile].is-out .tile-x');
+    if (marks.length) gsap.set(marks, { clearProps: 'all' });
+  }
+
+  private leaveArenaNow() {
+    gsap.set(this.all('[data-arena]'), { autoAlpha: 0 });
+    gsap.set(this.stage(), { autoAlpha: 1 });
+    this.opts.store.set({ arena: 'hidden' });
+  }
+
+  /** Zoom out from the player's seat to all 100 screens (standings). Display only. */
+  openArena(seat: number): void {
+    if (this.tl) this.skip();
+    if (this.opts.store.get().arena !== 'hidden') return;
+    this.arenaTl?.kill();
+    const arena = this.one('[data-arena]');
+    const grid = this.one('[data-arena-grid]');
+    const stage = this.stage();
+    const fresh = this.all('[data-tile].is-new .tile-x');
+    this.opts.store.set({ arena: 'open' });
+    const tl = gsap.timeline();
+    this.arenaTl = tl;
+    const z = this.seatZoom(seat);
+    if (this.motion.reduced || !z || !grid) {
+      tl.to(stage, { autoAlpha: 0, duration: 0.2 }).to(arena, { autoAlpha: 1, duration: 0.2 }, '<');
+      return;
+    }
+    const chrome = this.all('[data-arena] .arena-chrome');
+    tl.set(grid, { ...z, transformOrigin: '0 0' });
+    tl.set(chrome, { autoAlpha: 0 });
+    if (fresh.length) tl.set(fresh, { autoAlpha: 0, scale: 2.4 });
+    tl.to(stage, { autoAlpha: 0, scale: 0.92, duration: 0.3 });
+    tl.to(arena, { autoAlpha: 1, duration: 0.25 }, '<0.05');
+    tl.to(grid, { x: 0, y: 0, scale: 1, duration: 0.9, ease: 'power3.inOut' }, '<');
+    tl.to(chrome, { autoAlpha: 1, duration: 0.25 }, '>-0.15');
+    if (fresh.length) {
+      tl.to(fresh, { autoAlpha: 1, scale: 1, duration: 0.3, ease: 'power4.in', stagger: 0.12 }, '>-0.05');
+      this.cue(tl, 'ko', '<');
+    }
+  }
+
+  /** Back from the standings to the table. */
+  closeArena(seat: number): void {
+    if (this.opts.store.get().arena !== 'open') return;
+    this.arenaTl?.kill();
+    const arena = this.one('[data-arena]');
+    const grid = this.one('[data-arena-grid]');
+    const stage = this.stage();
+    const tl = gsap.timeline({ onComplete: () => this.opts.store.set({ arena: 'hidden' }) });
+    this.arenaTl = tl;
+    const z = this.seatZoom(seat);
+    this.clearMarks();
+    if (this.motion.reduced || !z || !grid) {
+      tl.to(arena, { autoAlpha: 0, duration: 0.2 }).to(stage, { autoAlpha: 1, scale: 1, duration: 0.2 }, '<');
+      return;
+    }
+    tl.to(this.all('[data-arena] .arena-chrome'), { autoAlpha: 0, duration: 0.15 });
+    tl.to(grid, { ...z, duration: 0.7, ease: 'power3.in' }, '<');
+    tl.to(arena, { autoAlpha: 0, duration: 0.25 }, '>-0.2');
+    tl.to(stage, { autoAlpha: 1, scale: 1, duration: 0.3 }, '<');
+    tl.set(grid, { x: 0, y: 0, scale: 1 });
+    tl.set(this.all('[data-arena] .arena-chrome'), { autoAlpha: 1 });
   }
 
   // ---- helpers ---------------------------------------------------------

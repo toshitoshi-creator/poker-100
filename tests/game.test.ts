@@ -1,5 +1,5 @@
 import { anteFor, effectTier, HAND_BONUS } from '../src/logic/combat';
-import { createGame, legalActions, playerAct, startHand, TOTAL_PLAYERS, type GameState } from '../src/logic/game';
+import { aliveSeats, createGame, legalActions, playerAct, startHand, TOTAL_PLAYERS, type GameState } from '../src/logic/game';
 import { HandCategory } from '../src/logic/handEvaluator';
 import { autoplay } from './helpers/autoplay';
 
@@ -106,5 +106,29 @@ describe('full games (random player policy)', () => {
 
   it('starts with 100 survivors', () => {
     expect(createGame(1).survivors).toBe(TOTAL_PLAYERS);
+  });
+
+  it('tracks all 100 seats consistently', () => {
+    for (const seed of seeds.slice(0, 10)) {
+      const states = autoplay(seed);
+      for (let i = 1; i < states.length; i++) {
+        const prev = states[i - 1]!;
+        const s = states[i]!;
+        const alive = aliveSeats(s.roster);
+        expect(s.roster.out).toHaveLength(TOTAL_PLAYERS);
+        expect(alive.length).toBe(s.survivors);
+        expect(s.player.seat).toBe(s.roster.you);
+        expect(s.opponent.seat).not.toBe(s.roster.you);
+        if (s.status === 'playing') expect(s.roster.out[s.opponent.seat]).toBeNull();
+        // Once out, always out, with the round it happened in.
+        prev.roster.out.forEach((o, seat) => o !== null && expect(s.roster.out[seat]).toBe(o));
+        if (!s.hand && s.lastRound?.round === s.round) {
+          const r = s.lastRound;
+          expect(r.survivors.before - r.survivors.after).toBe(r.survivors.fallen.length);
+          r.survivors.fallen.forEach((seat) => expect(s.roster.out[seat]).toBe(r.round));
+          expect(r.survivors.fallen.includes(s.roster.you)).toBe(r.eliminated === 'player');
+        }
+      }
+    }
   });
 });

@@ -139,6 +139,38 @@ describe('presentation', () => {
     expectScreenMatches(s);
   });
 
+  it('opens on the 100-player lobby and zooms into the table on join', () => {
+    render(<App seed={42} />);
+    const arena = document.querySelector('[data-arena]')!;
+    expect(arena.classList.contains('is-lobby')).toBe(true);
+    expect(visible(arena)).toBe(true);
+    expect(document.querySelectorAll('[data-tile]')).toHaveLength(100);
+    expect(document.querySelector(`[data-tile="${createGame(42).roster.you}"]`)!.classList.contains('is-you')).toBe(true);
+    click(screen.getByTestId('join'));
+    expect(isPlaying()).toBe(true);
+    click(primary()!); // skip the intro + deal
+    expect(visible(arena)).toBe(false);
+    expect(visible(document.querySelector('[data-stage]'))).toBe(true);
+    expect(num('pot')).toBe(4);
+  });
+
+  it('standings view shows who is out, and never changes the game', () => {
+    render(<App seed={5} />);
+    const s = playHandWithChecks(createGame(5));
+    click(screen.getByTestId('standings'));
+    const arena = document.querySelector('[data-arena]')!;
+    expect(arena.classList.contains('is-open')).toBe(true);
+    expect(num('arena-alive')).toBe(s.survivors);
+    const out = document.querySelectorAll('[data-tile].is-out');
+    expect(out.length).toBe(100 - s.survivors);
+    expect(document.querySelectorAll('[data-tile].is-new').length).toBe(s.lastRound!.survivors.fallen.length);
+    click(screen.getByTestId('arena-close'));
+    expectScreenMatches(s);
+    // Next deal still works and closes nothing it shouldn't.
+    click(primary()!);
+    expect(isPlaying()).toBe(true);
+  });
+
   it('honours prefers-reduced-motion and still lands on the same result', () => {
     const mm = window.matchMedia;
     window.matchMedia = ((q: string) => ({
