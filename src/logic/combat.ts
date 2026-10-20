@@ -12,7 +12,7 @@ export const HAND_BONUS: Record<HandCategory, number> = {
   [HandCategory.ThreeOfAKind]: 16,
   [HandCategory.Straight]: 20,
   [HandCategory.Flush]: 22,
-  [HandCategory.FullHouse]: 24,
+  [HandCategory.FullHouse]: 28,
   [HandCategory.FourOfAKind]: 35,
   [HandCategory.StraightFlush]: 50,
   [HandCategory.RoyalFlush]: 80,

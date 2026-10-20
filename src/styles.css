@@ -325,7 +325,7 @@ body {
   position: absolute;
   inset: 0;
   border-radius: var(--radius);
-  background: var(--back);
+  background: url('./assets/card-back.webp') center / 100% 100% no-repeat;
   box-shadow: 0 1px 2px #0008;
 }
 .deck-card:nth-child(1) {
@@ -336,11 +336,6 @@ body {
 }
 
 /* ---------- Card ---------- */
-.app {
-  --back: repeating-linear-gradient(45deg, #b3212c 0 4px, #8e1720 4px 8px),
-    linear-gradient(#b3212c, #8e1720);
-}
-
 .card {
   position: relative;
   width: var(--cw);
@@ -367,8 +362,8 @@ body {
   box-shadow: 0 2px 6px #0007;
 }
 .card-back {
-  background: var(--back);
-  border: 3px solid #fbfaf5;
+  /* The artwork carries its own white border. */
+  background: url('./assets/card-back.webp') center / 100% 100% no-repeat;
 }
 .card-front {
   /* Shows when .card-inner is at rotateY(180deg). */
