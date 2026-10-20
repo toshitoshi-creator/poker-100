@@ -1,5 +1,5 @@
 import { parseCard } from '../src/logic/deck';
-import { HandCategory, compareHands, evaluateBest } from '../src/logic/handEvaluator';
+import { HandCategory, compareHands, evaluateBest, evaluateFive } from '../src/logic/handEvaluator';
 
 const hand = (s: string) => evaluateBest(s.split(' ').map(parseCard));
 const ids = (s: string) => hand(s).cards.map((c) => c.id);
@@ -78,5 +78,23 @@ describe('compareHands', () => {
 
   it('full house: trips rank decides before pair', () => {
     expect(compareHands(hand('3c 3d 3h As Ad'), hand('2c 2d 2h Ks Kd'))).toBe(1);
+  });
+});
+
+describe('fast evaluator', () => {
+  it('matches brute force on 30,000 random hands of 5, 6 and 7 cards', async () => {
+    const { evaluateBestBrute } = await import('../src/logic/handEvaluator');
+    const { createDeck, shuffle } = await import('../src/logic/deck');
+    const { mulberry32 } = await import('../src/logic/rng');
+    const rng = mulberry32(2024);
+    for (let i = 0; i < 30000; i++) {
+      const n = 5 + (i % 3);
+      const cards = shuffle(createDeck(), rng).slice(0, n);
+      const fast = evaluateBest(cards);
+      const slow = evaluateBestBrute(cards);
+      expect(fast.score).toEqual(slow.score);
+      expect(fast.category).toBe(slow.category);
+      expect(evaluateFive(fast.cards).score).toEqual(slow.score);
+    }
   });
 });

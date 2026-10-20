@@ -27,7 +27,7 @@ export const Arena = memo(function Arena({ game, mode, onJoin, onClose }: Props)
   const alive = aliveSeats(roster).length;
   const lastRound = game.hand ? null : game.lastRound?.round ?? null;
   const fresh = lastRound === null ? 0 : roster.out.filter((o) => o === lastRound).length;
-  const oppSeat = game.status === 'playing' ? game.opponent.seat : -1;
+  const tablemates = new Set(game.status === 'playing' ? game.seats.slice(1).flatMap((f) => (f ? [f.seat] : [])) : []);
   const youOut = roster.out[roster.you] !== null;
 
   return (
@@ -48,7 +48,7 @@ export const Arena = memo(function Arena({ game, mode, onJoin, onClose }: Props)
           const cls = [
             'tile',
             i === roster.you && 'is-you',
-            i === oppSeat && out === null && 'is-opp',
+            tablemates.has(i) && out === null && 'is-opp',
             out !== null && 'is-out',
             out !== null && out === lastRound && 'is-new',
           ]
@@ -82,7 +82,7 @@ export const Arena = memo(function Arena({ game, mode, onJoin, onClose }: Props)
               <i className="lg lg-you" />
               あなた{youOut ? '（脱落）' : ''}
               <i className="lg lg-opp" />
-              対戦中
+              同じ卓
               <i className="lg lg-out" />
               脱落
             </p>

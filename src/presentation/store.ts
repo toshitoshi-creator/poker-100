@@ -32,15 +32,18 @@ export function useStore<T, S>(store: Store<T>, select: (s: T) => S): S {
 
 export type Phase = 'idle' | 'deal' | 'preflop' | 'flop' | 'turn' | 'river' | 'showdown' | 'result';
 
-/** What the screen currently shows. Driven by the Director; never read by game logic. */
+/** What the screen currently shows. Driven by the Director; never read by game logic. Arrays are per table seat. */
 export interface PresentationState {
   phase: Phase;
-  playerHp: number;
-  opponentHp: number;
+  hp: number[];
+  /** Chips in front of each seat this street. */
+  bets: number[];
+  say: string[];
   pot: number;
   survivors: number;
-  sayPlayer: string;
-  sayOpponent: string;
+  button: number;
+  /** Seat whose action is being shown (-1 = none). */
+  active: number;
   /** Round id currently on screen (0 = none yet). */
   round: number;
   playing: boolean;

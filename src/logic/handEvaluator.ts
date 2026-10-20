@@ -95,8 +95,8 @@ export function evaluateFive(cards: readonly Card[]): HandResult {
   return { category: HandCategory.HighCard, score: [0, ...ranks], cards: sorted };
 }
 
-/** Best 5-card hand out of 5–7 cards (checks all combinations, max 21). */
-export function evaluateBest(cards: readonly Card[]): HandResult {
+/** Best 5-card hand out of 5–7 cards by brute force (all ≤21 combinations). Reference for tests. */
+export function evaluateBestBrute(cards: readonly Card[]): HandResult {
   if (cards.length < 5 || cards.length > 7) throw new Error('evaluateBest needs 5 to 7 cards');
   let best: HandResult | null = null;
   const n = cards.length;
@@ -109,4 +109,89 @@ export function evaluateBest(cards: readonly Card[]): HandResult {
             if (!best || compareScore(r.score, best.score) > 0) best = r;
           }
   return best!;
+}
+
+/** Five cards of a straight with high card `high` (5 = wheel, ace plays low), from rank-sorted cards. */
+function straightFrom(sorted: readonly Card[], high: number): Card[] | null {
+  const want = high === 5 ? [5, 4, 3, 2, 14] : [high, high - 1, high - 2, high - 3, high - 4];
+  const out: Card[] = [];
+  for (const r of want) {
+    const c = sorted.find((x) => x.rank === r);
+    if (!c) return null;
+    out.push(c);
+  }
+  return out;
+}
+
+function bestStraightHigh(sorted: readonly Card[]): number {
+  const has = new Set(sorted.map((c) => c.rank as number));
+  for (let h = 14; h >= 6; h--) if ([0, 1, 2, 3, 4].every((d) => has.has(h - d))) return h;
+  return [5, 4, 3, 2, 14].every((r) => has.has(r)) ? 5 : 0;
+}
+
+/**
+ * Best 5-card hand out of 5–7 cards, computed directly from rank and suit
+ * counts (no combinations). Same result as evaluateBestBrute, much faster:
+ * the AI runs it thousands of times per decision.
+ */
+export function evaluateBest(cards: readonly Card[]): HandResult {
+  if (cards.length < 5 || cards.length > 7) throw new Error('evaluateBest needs 5 to 7 cards');
+  const sorted = [...cards].sort((x, y) => y.rank - x.rank);
+
+  // With at most 7 cards a flush excludes quads and full houses, so only a straight flush beats it.
+  for (const suit of ['s', 'h', 'd', 'c'] as const) {
+    const suited = sorted.filter((c) => c.suit === suit);
+    if (suited.length < 5) continue;
+    const sh = bestStraightHigh(suited);
+    if (sh) {
+      const category = sh === 14 ? HandCategory.RoyalFlush : HandCategory.StraightFlush;
+      return { category, score: [category, sh], cards: straightFrom(suited, sh)! };
+    }
+    const top = suited.slice(0, 5);
+    return { category: HandCategory.Flush, score: [5, ...top.map((c) => c.rank)], cards: top };
+  }
+
+  const groups = new Map<number, Card[]>();
+  for (const c of sorted) groups.set(c.rank, [...(groups.get(c.rank) ?? []), c]);
+  const byCount = (n: number) => [...groups.entries()].filter(([, g]) => g.length >= n).map(([r]) => r).sort((a, b) => b - a);
+  const quads = byCount(4);
+  const trips = byCount(3);
+  const pairs = byCount(2);
+  const kickers = (exclude: number[], n: number) => sorted.filter((c) => !exclude.includes(c.rank)).slice(0, n);
+
+  if (quads.length) {
+    const q = quads[0]!;
+    const k = kickers([q], 1);
+    return { category: HandCategory.FourOfAKind, score: [7, q, ...k.map((c) => c.rank)], cards: [...groups.get(q)!.slice(0, 4), ...k] };
+  }
+  if (trips.length) {
+    const t = trips[0]!;
+    const p = pairs.filter((r) => r !== t)[0];
+    if (p !== undefined) {
+      return { category: HandCategory.FullHouse, score: [6, t, p], cards: [...groups.get(t)!.slice(0, 3), ...groups.get(p)!.slice(0, 2)] };
+    }
+  }
+  const sh = bestStraightHigh(sorted);
+  if (sh) return { category: HandCategory.Straight, score: [4, sh], cards: straightFrom(sorted, sh)! };
+  if (trips.length) {
+    const t = trips[0]!;
+    const k = kickers([t], 2);
+    return { category: HandCategory.ThreeOfAKind, score: [3, t, ...k.map((c) => c.rank)], cards: [...groups.get(t)!.slice(0, 3), ...k] };
+  }
+  if (pairs.length >= 2) {
+    const [p1, p2] = pairs as [number, number];
+    const k = kickers([p1, p2], 1);
+    return {
+      category: HandCategory.TwoPair,
+      score: [2, p1, p2, ...k.map((c) => c.rank)],
+      cards: [...groups.get(p1)!.slice(0, 2), ...groups.get(p2)!.slice(0, 2), ...k],
+    };
+  }
+  if (pairs.length === 1) {
+    const p = pairs[0]!;
+    const k = kickers([p], 3);
+    return { category: HandCategory.OnePair, score: [1, p, ...k.map((c) => c.rank)], cards: [...groups.get(p)!.slice(0, 2), ...k] };
+  }
+  const top = sorted.slice(0, 5);
+  return { category: HandCategory.HighCard, score: [0, ...top.map((c) => c.rank)], cards: top };
 }

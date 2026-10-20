@@ -16,12 +16,13 @@ function initialPresentation(g: GameState): PresentationState {
   const v = idleView(g);
   return {
     phase: v.phase,
-    playerHp: v.playerHp,
-    opponentHp: v.opponentHp,
+    hp: v.hp,
+    bets: v.bets,
+    say: v.say,
     pot: 0,
     survivors: v.survivors,
-    sayPlayer: '',
-    sayOpponent: '',
+    button: v.button,
+    active: -1,
     round: v.round,
     playing: false,
     arena: 'lobby',
@@ -88,7 +89,7 @@ export function App({ seed: initialSeed }: { seed?: number }) {
 
   const over = game.status !== 'playing' && !playing && arena === 'hidden';
   const mode = over ? 'over' : playing ? 'playing' : game.hand ? 'decide' : 'idle';
-  const dealLabel = !game.lastRound ? '▶ 配る' : game.lastRound.eliminated === 'opponent' ? '▶ 次の対戦相手' : '▶ 次のラウンド';
+  const dealLabel = !game.lastRound ? '▶ 配る' : '▶ 次のハンド';
 
   const restart = () => {
     const s = randomSeed();
@@ -107,7 +108,7 @@ export function App({ seed: initialSeed }: { seed?: number }) {
         onStandings={() => (arena === 'open' ? directorRef.current?.closeArena(game.roster.you) : directorRef.current?.openArena(game.roster.you))}
       />
       <div className="app-body" ref={bodyRef}>
-      <Table game={game} store={store} />
+      <Table game={game} store={store} yourTurn={mode === 'decide'} />
       <Controls
         mode={mode}
         legal={mode === 'decide' ? controller.legal() : []}

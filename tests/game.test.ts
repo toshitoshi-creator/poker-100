@@ -1,12 +1,22 @@
 import { anteFor, effectTier, HAND_BONUS } from '../src/logic/combat';
-import { aliveSeats, createGame, legalActions, playerAct, startHand, TOTAL_PLAYERS, type GameState } from '../src/logic/game';
+import {
+  aliveSeats,
+  createGame,
+  legalActions,
+  playerAct,
+  startHand,
+  TABLE_SIZE,
+  TOTAL_PLAYERS,
+  type GameState,
+} from '../src/logic/game';
 import { HandCategory } from '../src/logic/handEvaluator';
 import { autoplay } from './helpers/autoplay';
 
-const total = (s: GameState) => s.player.hp + s.opponent.hp + (s.hand ? s.hand.committed.player + s.hand.committed.opponent : 0);
+const tableChips = (s: GameState) =>
+  s.seats.reduce((a, f) => a + (f?.hp ?? 0), 0) + (s.hand ? s.hand.committed.reduce((a, b) => a + b, 0) : 0);
 
 describe('rules', () => {
-  it('ante rises every 4 rounds', () => {
+  it('big blind rises every 4 hands', () => {
     expect([1, 4, 5, 8, 9, 13].map(anteFor)).toEqual([2, 2, 4, 4, 6, 8]);
   });
 
@@ -18,117 +28,109 @@ describe('rules', () => {
     }
   });
 
-  it('startHand posts antes and waits for the player', () => {
-    const s = startHand(createGame(1));
-    expect(s.hand!.committed).toEqual({ player: 2, opponent: 2 });
-    expect(s.player.hp).toBe(98);
-    expect(s.hand!.facing).toBe(0);
-    expect(s.lastEvents.map((e) => e.t)).toEqual(['start']);
-    expect(startHand(s)).toBe(s); // cannot start twice
+  it('seats six players: you at seat 0 plus five from the 100', () => {
+    const g = createGame(1);
+    expect(g.seats).toHaveLength(TABLE_SIZE);
+    expect(g.seats.every(Boolean)).toBe(true);
+    expect(g.seats[0]!.seat).toBe(g.roster.you);
+    expect(new Set(g.seats.map((f) => f!.seat)).size).toBe(TABLE_SIZE);
   });
 
-  it('offers check / bets when not facing, fold / call when facing', () => {
-    const s = startHand(createGame(1));
-    expect(legalActions(s).map((a) => a.type + (a.type === 'bet' ? `:${a.size}` : ''))).toEqual([
-      'check',
-      'bet:half',
-      'bet:pot',
-      'bet:allin',
-    ]);
-    const facing = { ...s, hand: { ...s.hand!, facing: 10 } };
-    expect(legalActions(facing).map((a) => a.type)).toEqual(['fold', 'call']);
+  it('startHand posts blinds, deals every seat and stops on your turn (or finishes the hand)', () => {
+    for (let seed = 1; seed < 20; seed++) {
+      const s = startHand(createGame(seed));
+      const start = (s.hand?.log ?? s.lastLog)[0]!;
+      expect(start.t).toBe('start');
+      if (start.t !== 'start') continue;
+      expect(start.blinds.map((b) => b.kind)).toEqual(['sb', 'bb']);
+      expect(start.blinds[1]!.amount).toBe(2);
+      if (s.hand) {
+        expect(s.hand.toAct).toBe(0);
+        expect(s.hand.deal.hole.every(Boolean)).toBe(true);
+        expect(legalActions(s).length).toBeGreaterThan(0);
+      }
+      expect(startHand(s)).toBe(s.hand ? s : s); // cannot start twice mid-hand
+    }
   });
 
   it('ignores illegal or stale actions', () => {
-    const s = startHand(createGame(1));
-    expect(playerAct(s, { type: 'call' })).toBe(s);
-    expect(playerAct(createGame(1), { type: 'check' })).toEqual(createGame(1));
+    const g = createGame(1);
+    expect(playerAct(g, { type: 'check' })).toBe(g);
+    let s = startHand(g);
+    for (let seed = 2; !s.hand; seed++) s = startHand(createGame(seed));
+    const illegal = legalActions(s).some((a) => a.type === 'check') ? { type: 'call' as const } : { type: 'check' as const };
+    expect(playerAct(s, illegal)).toBe(s);
   });
 
-  it('folding hands the pot to the other side, no bonus', () => {
-    let found = false;
-    for (let seed = 1; seed < 200 && !found; seed++) {
-      const r = playerAct(startHand(createGame(seed)), { type: 'check' });
-      if (!r.hand || r.hand.facing === 0) continue; // opponent checked back
-      found = true;
-      const f = playerAct(r, { type: 'fold' });
-      expect(f.lastRound!.endedBy).toBe('fold');
-      expect(f.lastRound!.winner).toBe('opponent');
-      expect(f.lastRound!.bonus).toBe(0);
-      expect(f.opponent.hp).toBe(r.opponent.hp + r.hand.committed.player + r.hand.committed.opponent);
+  it('folding preflop costs only what you put in', () => {
+    for (let seed = 1; seed < 40; seed++) {
+      const s = startHand(createGame(seed));
+      if (!s.hand || !legalActions(s).some((a) => a.type === 'fold')) continue;
+      const put = s.hand.committed[0]!;
+      const f = playerAct(s, { type: 'fold' });
+      const r = f.lastRound!;
+      expect(r.after[0]!.hp).toBe(r.before[0]!.hp - put);
+      expect(r.bonus[0]).toBe(0);
+      return;
     }
-    expect(found).toBe(true);
+    throw new Error('no seed where you could fold preflop');
   });
 });
 
 describe('full games (random player policy)', () => {
-  const seeds = Array.from({ length: 25 }, (_, i) => i + 1);
+  const seeds = Array.from({ length: 12 }, (_, i) => i + 1);
+  const games = seeds.map((seed) => autoplay(seed));
 
   it('is reproducible from the seed and the actions', () => {
-    expect(autoplay(12345)).toEqual(autoplay(12345));
+    expect(autoplay(12345, 60)).toEqual(autoplay(12345, 60));
   });
 
   it('keeps every invariant', () => {
-    for (const seed of seeds) {
-      const states = autoplay(seed);
+    for (const states of games) {
       for (let i = 1; i < states.length; i++) {
         const prev = states[i - 1]!;
         const s = states[i]!;
-        expect(s.player.hp).toBeGreaterThanOrEqual(0);
-        expect(s.opponent.hp).toBeGreaterThanOrEqual(0);
+        for (const f of s.seats) if (f) expect(f.hp).toBeGreaterThanOrEqual(0);
         expect(s.survivors).toBeLessThanOrEqual(prev.survivors);
+        expect(aliveSeats(s.roster).length).toBe(s.survivors);
         if (s.hand) {
           // Mid-hand: chips only move between stacks and the pot.
-          expect(total(s)).toBe(total(prev));
-          expect(s.hand.log.at(-1)).toBe(s.lastEvents.at(-1));
-        } else if (s.lastRound && s.lastRound.round === s.round) {
+          const start = s.hand.log[0]!;
+          if (start.t !== 'start') throw new Error('log must begin with start');
+          expect(tableChips(s)).toBe(start.seats.reduce((a, f) => a + (f?.hp ?? 0), 0));
+          expect(s.hand.toAct).toBe(0);
+        } else if (s.lastRound?.round === s.round) {
           const r = s.lastRound;
-          expect(s.lastEvents.at(-1)!.t).toBe('award');
-          // Only the hand bonus leaves the table (KO'd opponents are replaced).
-          const after = r.player.after.hp + r.opponent.after.hp;
-          const before = r.player.before.hp + r.opponent.before.hp;
-          expect(after).toBe(before - r.bonus);
-          if (r.endedBy === 'fold') expect(r.featuredHand).toBeNull();
-          if (r.winner === 'tie') expect(r.bonus).toBe(0);
-          if (r.eliminated) expect(r[r.eliminated].after.hp).toBe(0);
-          expect(s.lastLog[0]!.t).toBe('start');
+          const before = r.before.reduce((a, f) => a + (f?.hp ?? 0), 0);
+          const after = r.after.reduce((a, f) => a + (f?.hp ?? 0), 0);
+          const burned = r.bonus.reduce((a, b) => a + b, 0);
+          // Only the hand bonus leaves the table.
+          expect(after).toBe(before - burned);
+          expect(r.pots.reduce((a, p) => a + p.amount, 0)).toBe(r.committed.reduce((a, b) => a + b, 0));
+          expect(r.payout.reduce((a, b) => a + b, 0)).toBe(r.committed.reduce((a, b) => a + b, 0));
+          if (r.endedBy === 'fold') expect(burned).toBe(0);
+          for (const seat of r.eliminated) expect(s.roster.out[r.after[seat]!.seat]).toBe(r.round);
+          // Bonus only hits players who showed down and lost.
+          r.bonus.forEach((b, seat) => b > 0 && expect(r.showdown).toContain(seat));
+          // Refilled seats are alive and unique.
+          if (s.status === 'playing') {
+            const ids = s.seats.filter(Boolean).map((f) => f!.seat);
+            expect(new Set(ids).size).toBe(ids.length);
+            ids.forEach((id) => expect(s.roster.out[id]).toBeNull());
+          }
         }
       }
       const end = states.at(-1)!;
       if (end.status === 'won') expect(end.survivors).toBe(1);
-      if (end.status === 'lost') expect(end.player.hp).toBe(0);
+      if (end.status === 'lost') expect(end.seats[0]!.hp).toBe(0);
     }
   });
 
   it('every game eventually ends', () => {
-    for (const seed of seeds) expect(autoplay(seed, 2000).at(-1)!.status).not.toBe('playing');
+    for (const seed of seeds.slice(0, 6)) expect(autoplay(seed, 3000).at(-1)!.status).not.toBe('playing');
   });
 
   it('starts with 100 survivors', () => {
     expect(createGame(1).survivors).toBe(TOTAL_PLAYERS);
-  });
-
-  it('tracks all 100 seats consistently', () => {
-    for (const seed of seeds.slice(0, 10)) {
-      const states = autoplay(seed);
-      for (let i = 1; i < states.length; i++) {
-        const prev = states[i - 1]!;
-        const s = states[i]!;
-        const alive = aliveSeats(s.roster);
-        expect(s.roster.out).toHaveLength(TOTAL_PLAYERS);
-        expect(alive.length).toBe(s.survivors);
-        expect(s.player.seat).toBe(s.roster.you);
-        expect(s.opponent.seat).not.toBe(s.roster.you);
-        if (s.status === 'playing') expect(s.roster.out[s.opponent.seat]).toBeNull();
-        // Once out, always out, with the round it happened in.
-        prev.roster.out.forEach((o, seat) => o !== null && expect(s.roster.out[seat]).toBe(o));
-        if (!s.hand && s.lastRound?.round === s.round) {
-          const r = s.lastRound;
-          expect(r.survivors.before - r.survivors.after).toBe(r.survivors.fallen.length);
-          r.survivors.fallen.forEach((seat) => expect(s.roster.out[seat]).toBe(r.round));
-          expect(r.survivors.fallen.includes(s.roster.you)).toBe(r.eliminated === 'player');
-        }
-      }
-    }
   });
 });

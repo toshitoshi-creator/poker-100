@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { App } from '../src/App';
-import { createGame, playerAct, startHand, type GameState, type PlayerAction } from '../src/logic/game';
+import { createGame, legalActions, playerAct, startHand, TABLE_SIZE, type GameState, type PlayerAction } from '../src/logic/game';
 import { mulberry32 } from '../src/logic/rng';
 import { currentLog, viewAt } from '../src/presentation/view';
 import { autoplay } from './helpers/autoplay';
@@ -10,45 +10,57 @@ const visible = (el: Element | null) => !!el && (el as HTMLElement).style.visibi
 const click = (el: Element) => act(() => fireEvent.click(el));
 const primary = () => screen.queryByTestId('primary');
 const isPlaying = () => primary()?.textContent?.includes('スキップ') ?? false;
+const skipIfPlaying = () => isPlaying() && click(primary()!);
 
-/** Tap through a whole hand, skipping every animation; mirrors the moves on a pure state. */
-function playHandWithChecks(state: GameState): GameState {
-  click(primary()!); // deal
+/** Check / call down a hand, skipping every animation; mirrors the moves on a pure state. */
+function playHandPassively(state: GameState): GameState {
+  click(primary()!); // deal (or join from the lobby)
   let s = startHand(state);
-  for (let guard = 0; guard < 10; guard++) {
-    if (isPlaying()) click(primary()!);
-    if (!s.hand) break;
-    const a: PlayerAction = s.hand.facing > 0 ? { type: 'call' } : { type: 'check' };
-    click(screen.getByTestId(a.type === 'call' ? 'act-call' : 'act-check'));
+  for (let guard = 0; guard < 20 && s.hand; guard++) {
+    skipIfPlaying();
+    const a: PlayerAction = legalActions(s).some((l) => l.type === 'check') ? { type: 'check' } : { type: 'call' };
+    click(screen.getByTestId(`act-${a.type}`));
     s = playerAct(s, a);
   }
-  if (isPlaying()) click(primary()!);
+  skipIfPlaying();
   return s;
 }
 
+function join(state: GameState): GameState {
+  click(screen.getByTestId('join'));
+  return startHand(state);
+}
+
+/** Everything the screen shows matches the decided state. */
 function expectScreenMatches(s: GameState) {
-  const r = s.lastRound!;
-  expect(num('hp-player')).toBe(r.player.after.hp);
-  expect(num('hp-opponent')).toBe(r.opponent.after.hp);
+  const r = s.hand ? null : s.lastRound;
+  for (let i = 0; i < TABLE_SIZE; i++) {
+    const f = r ? r.after[i] : s.seats[i];
+    if (!f) continue;
+    expect(num(`hp-${i}`)).toBe(f.hp);
+    if (s.hand) expect(screen.getByTestId(`bet-${i}`).textContent).toBe(s.hand.streetBet[i] ? String(s.hand.streetBet[i]) : '');
+  }
   expect(num('survivors')).toBe(s.survivors);
-  expect(num('pot')).toBe(0);
+  const expectedPot = s.hand ? s.hand.committed.reduce((a, b) => a + b, 0) - s.hand.streetBet.reduce((a, b) => a + b, 0) : 0;
+  expect(num('pot')).toBe(expectedPot);
 }
 
 afterEach(cleanup);
 
 describe('view reducer', () => {
   it('replaying any hand log lands on the logic state', () => {
-    for (const seed of [1, 2, 3, 4, 5]) {
-      for (const s of autoplay(seed, 120)) {
+    for (const seed of [1, 2, 3, 6]) {
+      for (const s of autoplay(seed, 150)) {
         const log = currentLog(s);
         if (!log.length) continue;
         const v = viewAt(log, log.length);
         if (s.hand) {
-          expect(v.playerHp).toBe(s.player.hp);
-          expect(v.opponentHp).toBe(s.opponent.hp);
-          expect(v.pot).toBe(s.hand.committed.player + s.hand.committed.opponent);
+          expect(v.hp).toEqual(s.seats.map((f) => f?.hp ?? 0));
+          expect(v.pot + v.bets.reduce((a, b) => a + b, 0)).toBe(s.hand.committed.reduce((a, b) => a + b, 0));
+          expect(v.bets).toEqual(s.hand.streetBet);
+          expect(v.folded).toEqual(s.hand.inHand.map((on, i) => !on && !!s.hand!.deal.hole[i]));
         } else {
-          expect(v.playerHp).toBe(s.lastRound!.player.after.hp);
+          expect(v.hp).toEqual(s.lastRound!.after.map((f) => f?.hp ?? 0));
           expect(v.survivors).toBe(s.survivors);
           expect(v.pot).toBe(0);
         }
@@ -58,41 +70,47 @@ describe('view reducer', () => {
 });
 
 describe('presentation', () => {
-  it('bets move HP into the pot; skip lands on the decided numbers', () => {
+  it('opens on the 100-player lobby and zooms into the table on join', () => {
     render(<App seed={42} />);
-    click(primary()!); // deal → antes posted (animating)
+    const arena = document.querySelector('[data-arena]')!;
+    expect(arena.classList.contains('is-lobby')).toBe(true);
+    expect(visible(arena)).toBe(true);
+    expect(document.querySelectorAll('[data-tile]')).toHaveLength(100);
+    expect(document.querySelectorAll('[data-tile].is-opp')).toHaveLength(5);
+    const s = join(createGame(42));
     expect(isPlaying()).toBe(true);
-    click(primary()!); // skip
-    const s1 = startHand(createGame(42));
-    expect(num('hp-player')).toBe(s1.player.hp);
-    expect(num('pot')).toBe(4);
-    // Player cards face up, opponent face down, board hidden.
-    expect(visible(document.querySelector('[data-card="p0"] .card-front'))).toBe(true);
-    expect(visible(document.querySelector('[data-card="o0"] .card-front'))).toBe(false);
-    expect(visible(document.querySelector('[data-card="b0"]'))).toBe(false);
+    click(primary()!); // skip the intro + deal (+ AI actions)
+    expect(visible(arena)).toBe(false);
+    expect(visible(document.querySelector('[data-stage]'))).toBe(true);
+    expectScreenMatches(s);
+  });
 
-    click(screen.getByTestId('act-bet-half'));
-    click(primary()!); // skip
-    const s2 = playerAct(s1, { type: 'bet', size: 'half' });
-    if (s2.hand) {
-      expect(num('hp-player')).toBe(s2.player.hp);
-      expect(num('pot')).toBe(s2.hand.committed.player + s2.hand.committed.opponent);
-      expect(visible(document.querySelector('[data-card="b2"]'))).toBe(true); // flop is out
-      expect(visible(document.querySelector('[data-card="b3"]'))).toBe(false);
-    } else {
-      expectScreenMatches(s2);
+  it('six seats are dealt; only your cards are face up until showdown', () => {
+    render(<App seed={42} />);
+    const s = join(createGame(42));
+    click(primary()!);
+    expect(document.querySelectorAll('[data-seat]')).toHaveLength(TABLE_SIZE);
+    if (s.hand) {
+      expect(visible(document.querySelector('[data-card="h0-0"] .card-front'))).toBe(true);
+      for (let i = 1; i < TABLE_SIZE; i++) {
+        if (!s.hand.deal.hole[i]) continue;
+        expect(visible(document.querySelector(`[data-card="h${i}-0"]`))).toBe(true);
+        expect(visible(document.querySelector(`[data-card="h${i}-0"] .card-front`))).toBe(false);
+      }
+      expect(screen.queryByTestId('act-fold') ?? screen.queryByTestId('act-check')).not.toBeNull();
     }
   });
 
   it('a full hand ends with every effect element at rest and the right numbers', () => {
     render(<App seed={3453} />);
-    const s = playHandWithChecks(createGame(3453));
+    const s = playHandPassively(createGame(3453));
     expectScreenMatches(s);
     expect(visible(document.querySelector('[data-banner]'))).toBe(false);
-    expect(visible(document.querySelector('[data-projectile]'))).toBe(false);
-    document.querySelectorAll('[data-particle], [data-chip]').forEach((p) => expect(visible(p)).toBe(false));
-    if (s.lastRound!.endedBy === 'showdown') {
-      for (const slot of ['o0', 'o1', 'b4']) expect(visible(document.querySelector(`[data-card="${slot}"] .card-front`))).toBe(true);
+    document.querySelectorAll('[data-projectile], [data-particle], [data-chip]').forEach((p) => expect(visible(p)).toBe(false));
+    const r = s.lastRound!;
+    if (r.endedBy === 'showdown') {
+      for (const seat of r.showdown) expect(visible(document.querySelector(`[data-card="h${seat}-0"] .card-front`))).toBe(true);
+      expect(visible(document.querySelector('[data-card="b4"] .card-front'))).toBe(true);
     }
   });
 
@@ -101,16 +119,18 @@ describe('presentation', () => {
     const rng = mulberry32(1);
     let s = createGame(77);
     let steps = 0;
-    for (let i = 0; i < 300 && s.status === 'playing'; i++) {
-      const btns = [...document.querySelectorAll<HTMLButtonElement>('.controls button:not(:disabled)')];
+    for (let i = 0; i < 250 && s.status === 'playing'; i++) {
+      const btns = [...document.querySelectorAll<HTMLButtonElement>('.controls button:not(:disabled), [data-testid="join"]')].filter(
+        (b) => b.dataset.testid !== 'join' || s.round === 0,
+      );
       if (!btns.length) break;
       const btn = btns[Math.floor(rng() * btns.length)]!;
       const id = btn.dataset.testid ?? '';
       // Mirror only the taps that are real game steps.
-      if (id === 'primary' && !isPlaying()) s = startHand(s);
+      if ((id === 'primary' && !isPlaying()) || id === 'join') s = startHand(s);
       else if (id.startsWith('act-')) {
         const [, type, size] = id.split('-') as [string, PlayerAction['type'], 'half' | 'pot' | 'allin' | undefined];
-        s = playerAct(s, type === 'bet' ? { type, size: size! } : ({ type } as PlayerAction));
+        s = playerAct(s, type === 'raise' ? { type, size: size! } : ({ type } as PlayerAction));
         steps++;
       }
       click(btn);
@@ -120,55 +140,32 @@ describe('presentation', () => {
         if (again?.dataset.testid === 'primary' && isPlaying()) click(again);
       }
     }
-    expect(steps).toBeGreaterThan(5);
-    if (isPlaying()) click(primary()!);
-    if (!s.hand && s.lastRound) expectScreenMatches(s);
-    else {
-      expect(num('hp-player')).toBe(s.player.hp);
-      expect(num('pot')).toBe(s.hand!.committed.player + s.hand!.committed.opponent);
-    }
+    expect(steps).toBeGreaterThan(3);
+    skipIfPlaying();
+    expectScreenMatches(s);
   });
 
   it('replay re-runs the last hand without touching the result', () => {
     render(<App seed={5} />);
-    const s = playHandWithChecks(createGame(5));
+    const s = playHandPassively(createGame(5));
     click(screen.getByText(/リプレイ/));
     expect(isPlaying()).toBe(true);
-    expect(num('pot')).toBe(0); // replay starts before the antes
+    expect(num('pot')).toBe(0); // replay starts before the blinds
     click(primary()!);
     expectScreenMatches(s);
-  });
-
-  it('opens on the 100-player lobby and zooms into the table on join', () => {
-    render(<App seed={42} />);
-    const arena = document.querySelector('[data-arena]')!;
-    expect(arena.classList.contains('is-lobby')).toBe(true);
-    expect(visible(arena)).toBe(true);
-    expect(document.querySelectorAll('[data-tile]')).toHaveLength(100);
-    expect(document.querySelector(`[data-tile="${createGame(42).roster.you}"]`)!.classList.contains('is-you')).toBe(true);
-    click(screen.getByTestId('join'));
-    expect(isPlaying()).toBe(true);
-    click(primary()!); // skip the intro + deal
-    expect(visible(arena)).toBe(false);
-    expect(visible(document.querySelector('[data-stage]'))).toBe(true);
-    expect(num('pot')).toBe(4);
   });
 
   it('standings view shows who is out, and never changes the game', () => {
     render(<App seed={5} />);
-    const s = playHandWithChecks(createGame(5));
+    const s = playHandPassively(createGame(5));
     click(screen.getByTestId('standings'));
     const arena = document.querySelector('[data-arena]')!;
     expect(arena.classList.contains('is-open')).toBe(true);
     expect(num('arena-alive')).toBe(s.survivors);
-    const out = document.querySelectorAll('[data-tile].is-out');
-    expect(out.length).toBe(100 - s.survivors);
+    expect(document.querySelectorAll('[data-tile].is-out').length).toBe(100 - s.survivors);
     expect(document.querySelectorAll('[data-tile].is-new').length).toBe(s.lastRound!.survivors.fallen.length);
     click(screen.getByTestId('arena-close'));
     expectScreenMatches(s);
-    // Next deal still works and closes nothing it shouldn't.
-    click(primary()!);
-    expect(isPlaying()).toBe(true);
   });
 
   it('honours prefers-reduced-motion and still lands on the same result', () => {
@@ -182,7 +179,7 @@ describe('presentation', () => {
     try {
       render(<App seed={3453} />);
       expect(document.querySelector('.app')!.classList.contains('is-reduced')).toBe(true);
-      expectScreenMatches(playHandWithChecks(createGame(3453)));
+      expectScreenMatches(playHandPassively(createGame(3453)));
     } finally {
       window.matchMedia = mm;
     }

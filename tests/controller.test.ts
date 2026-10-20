@@ -1,5 +1,5 @@
 import { GameController } from '../src/game/controller';
-import { createGame, playerAct, startHand, type GameEvent } from '../src/logic/game';
+import { createGame, legalActions, playerAct, startHand, type GameEvent } from '../src/logic/game';
 import type { Presenter } from '../src/presentation/director';
 import type { TableView } from '../src/presentation/view';
 import { randomPolicy } from './helpers/autoplay';
@@ -10,7 +10,7 @@ class FakePresenter implements Presenter {
   playing = false;
   play(log: readonly GameEvent[], from: number) {
     if (this.playing) this.skip();
-    this.log.push(`play:${log.slice(from).map((e) => e.t).join(',')}`);
+    this.log.push(`play:${log[from]?.t}`);
     this.playing = true;
   }
   show(_v: TableView) {
@@ -30,31 +30,41 @@ class FakePresenter implements Presenter {
   }
 }
 
+/** First seed whose opening hand waits for your decision. */
+function seedWithDecision(): number {
+  for (let seed = 1; ; seed++) if (startHand(createGame(seed)).hand) return seed;
+}
+
 describe('GameController', () => {
   it('resolves logic immediately, independent of the presenter', () => {
-    const c = new GameController(42);
+    const seed = seedWithDecision();
+    const c = new GameController(seed);
     c.deal();
-    expect(c.getState()).toEqual(startHand(createGame(42)));
-    c.act({ type: 'check' });
-    expect(c.getState()).toEqual(playerAct(startHand(createGame(42)), { type: 'check' }));
+    expect(c.getState()).toEqual(startHand(createGame(seed)));
+    const a = legalActions(c.getState())[0]!;
+    const action = a.type === 'raise' ? { type: 'raise' as const, size: a.size } : { type: a.type };
+    c.act(action as never);
+    expect(c.getState()).toEqual(playerAct(startHand(createGame(seed)), action as never));
   });
 
   it('skips a running presentation before the next step', () => {
-    const c = new GameController(42);
+    const c = new GameController(seedWithDecision());
     const p = new FakePresenter();
     c.attach(p);
     c.deal();
     p.play(c.getState().hand!.log, 0);
-    c.act({ type: 'check' });
+    c.act(c.legal().some((l) => l.type === 'check') ? { type: 'check' } : { type: 'call' });
     expect(p.log).toEqual(['play:start', 'skip']);
   });
 
-  it('ignores double taps: a stale action after the hand moved on is a no-op', () => {
-    const c = new GameController(42);
+  it('ignores double taps: a stale action is a no-op', () => {
+    const seed = seedWithDecision();
+    const c = new GameController(seed);
     c.deal();
     expect(c.deal()).toBe(false); // hand already running
-    c.act({ type: 'fold' }); // not legal unless facing a bet
-    expect(c.getState()).toEqual(startHand(createGame(42)));
+    const illegal = c.legal().some((l) => l.type === 'check') ? ({ type: 'call' } as const) : ({ type: 'check' } as const);
+    expect(c.act(illegal)).toBe(false);
+    expect(c.getState()).toEqual(startHand(createGame(seed)));
   });
 
   it('rapid mixed input produces exactly the same state as pure logic', () => {
@@ -83,14 +93,14 @@ describe('GameController', () => {
     c.attach(p);
     c.deal();
     c.replay(); // ignored mid-hand
-    while (c.getState().hand) c.act(c.legal()[0]!.type === 'fold' ? { type: 'call' } : { type: 'check' });
+    while (c.getState().hand) c.act(c.legal().some((l) => l.type === 'check') ? { type: 'check' } : { type: 'call' });
     const before = c.getState();
     c.replay();
     c.replay();
     c.skip();
     c.skip();
     expect(c.getState()).toBe(before);
-    expect(p.log.filter((l) => l.startsWith('play:start'))).toHaveLength(2);
+    expect(p.log.filter((l) => l === 'play:start')).toHaveLength(2);
   });
 
   it('notifies subscribers and resets cleanly', () => {
