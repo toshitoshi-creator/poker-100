@@ -18,7 +18,7 @@ function label(a: LegalAction): [string, string] {
     case 'call':
       return ['コール', `HP ${a.amount}`];
     case 'fold':
-      return ['フォールド', '降りる'];
+      return ['フォールド', a.penalty ? `ダメージ ${a.penalty}` : '降りる'];
     case 'raise':
       return [a.size === 'half' ? '½ポット' : a.size === 'pot' ? 'ポット' : 'オールイン', `HP ${a.amount}`];
   }

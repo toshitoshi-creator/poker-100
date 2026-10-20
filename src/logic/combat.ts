@@ -33,6 +33,16 @@ export function handBonus(winner: HandResult): number {
   return HAND_BONUS[winner.category];
 }
 
+/**
+ * Damage for folding: burned from the folder, on top of what they already
+ * put in. Without it, folding every hand would cost only the blinds and you
+ * could climb the ranking by sitting out. Grows with the big blind.
+ */
+export const FOLD_PENALTY_BASE = 4;
+export function foldPenalty(bigBlind: number): number {
+  return FOLD_PENALTY_BASE + bigBlind;
+}
+
 /** Forced bet both players post every round; rises every 4 rounds. */
 export function anteFor(round: number): number {
   return 2 + 2 * Math.floor((Math.max(1, round) - 1) / 4);

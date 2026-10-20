@@ -69,6 +69,8 @@ export interface AiContext {
   raise: { min: number; max: number } | null;
   /** Current highest bet this street. */
   currentBet: number;
+  /** HP lost by folding (the fold penalty). */
+  foldCost?: number;
   rng: Rng;
 }
 
@@ -95,7 +97,8 @@ export function decide(ctx: AiContext): AiDecision {
     return { type: 'check' };
   }
 
-  const potOdds = ctx.toCall / (ctx.pot + ctx.toCall);
+  // Folding is not free: calling is worth it once eq·(pot+call) − call ≥ −foldCost.
+  const potOdds = Math.max(0, (ctx.toCall - (ctx.foldCost ?? 0)) / (ctx.pot + ctx.toCall));
   const allIn = ctx.toCall >= ctx.stack;
   if (!allIn && strength > 2.1 && r < 0.55) return raiseTo(1);
   const need = allIn ? potOdds + 0.05 : potOdds * 1.1;

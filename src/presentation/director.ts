@@ -259,6 +259,13 @@ export class Director implements Presenter {
           const els = [0, 1].map((k) => this.one(`[data-card="${hole(e.seat, k)}"]`)).filter(Boolean);
           tl.to(els, { autoAlpha: 0.35, y: R ? 0 : 6, duration: 0.25 }, at);
           tl.to(els, { y: 0, duration: 0.15 });
+          if (e.penalty) {
+            // Folding hurts: the fold penalty comes straight off HP.
+            this.cue(tl, 'hit', at);
+            this.numAt(tl, 'hp', e.seat, before.hp[e.seat]!, after.hp[e.seat]!, 0.4, `${at}+=0.1`);
+            if (!R) this.shake(tl, this.one(`[data-seat="${e.seat}"]`), 4, `${at}+=0.1`);
+            tl.to({}, { duration: R ? 0.1 : 0.3 });
+          }
         } else if (e.kind === 'check') {
           this.cue(tl, 'check', at);
           tl.to({}, { duration: R ? 0.1 : 0.3 }, at);

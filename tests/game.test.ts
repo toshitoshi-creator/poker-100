@@ -1,4 +1,4 @@
-import { anteFor, effectTier, HAND_BONUS } from '../src/logic/combat';
+import { anteFor, effectTier, foldPenalty, HAND_BONUS } from '../src/logic/combat';
 import {
   aliveSeats,
   createGame,
@@ -78,18 +78,46 @@ describe('rules', () => {
     expect(playerAct(s, illegal)).toBe(s);
   });
 
-  it('folding preflop costs only what you put in', () => {
+  it('folding costs what you put in plus the fold penalty', () => {
     for (let seed = 1; seed < 40; seed++) {
       const s = startHand(createGame(seed));
-      if (!s.hand || !legalActions(s).some((a) => a.type === 'fold')) continue;
+      const fold = s.hand && legalActions(s).find((a) => a.type === 'fold');
+      if (!s.hand || !fold) continue;
       const put = s.hand.committed[0]!;
+      expect(fold.penalty).toBe(foldPenalty(s.hand.bb));
       const f = playerAct(s, { type: 'fold' });
       const r = f.lastRound!;
-      expect(r.after[0]!.hp).toBe(r.before[0]!.hp - put);
+      expect(r.penalty[0]).toBe(foldPenalty(2));
+      expect(r.after[0]!.hp).toBe(r.before[0]!.hp - put - foldPenalty(2));
       expect(r.bonus[0]).toBe(0);
       return;
     }
     throw new Error('no seed where you could fold preflop');
+  });
+
+  it('folding every hand is no longer a way to climb the ranking', () => {
+    for (const size of [2, 6] as const) {
+      let s = createGame(11, size);
+      while (s.status === 'playing') {
+        if (!s.hand) s = startHand(s);
+        else s = playerAct(s, legalActions(s).some((a) => a.type === 'fold') ? { type: 'fold' } : { type: 'check' });
+      }
+      expect(s.status).toBe('lost');
+      expect(s.survivors).toBeGreaterThan(50); // knocked out early, far from the top
+    }
+  });
+
+  it('a fold penalty that empties your HP knocks you out', () => {
+    for (let seed = 1; seed < 60; seed++) {
+      const g = createGame(seed);
+      let s = startHand({ ...g, seats: g.seats.map((f, i) => (i === 0 ? { ...f!, hp: 6 } : f)) });
+      if (!s.hand || !legalActions(s).some((a) => a.type === 'fold')) continue;
+      s = playerAct(s, { type: 'fold' });
+      expect(s.seats[0]!.hp).toBe(0);
+      expect(s.status).toBe('lost');
+      return;
+    }
+    throw new Error('no fold spot found');
   });
 });
 
@@ -113,18 +141,22 @@ describe('full games (random player policy, both table sizes)', () => {
           // Mid-hand: chips only move between stacks and the pot.
           const start = s.hand.log[0]!;
           if (start.t !== 'start') throw new Error('log must begin with start');
-          expect(tableChips(s)).toBe(start.seats.reduce((a, f) => a + (f?.hp ?? 0), 0));
+          // Mid-hand: chips only move between stacks and the pot, minus fold damage.
+          const burned = s.hand.penalty.reduce((a, b) => a + b, 0);
+          expect(tableChips(s)).toBe(start.seats.reduce((a, f) => a + (f?.hp ?? 0), 0) - burned);
           expect(s.hand.toAct).toBe(0);
         } else if (s.lastRound?.round === s.round) {
           const r = s.lastRound;
           const before = r.before.reduce((a, f) => a + (f?.hp ?? 0), 0);
           const after = r.after.reduce((a, f) => a + (f?.hp ?? 0), 0);
-          const burned = r.bonus.reduce((a, b) => a + b, 0);
-          // Only the hand bonus leaves the table.
+          const burned = r.bonus.reduce((a, b) => a + b, 0) + r.penalty.reduce((a, b) => a + b, 0);
+          // Only the hand bonus and fold damage leave the table.
           expect(after).toBe(before - burned);
+          // Every fold costs the penalty (unless the folder had less HP left).
+          r.penalty.forEach((p) => expect(p).toBeLessThanOrEqual(foldPenalty(anteFor(r.round))));
           expect(r.pots.reduce((a, p) => a + p.amount, 0)).toBe(r.committed.reduce((a, b) => a + b, 0));
           expect(r.payout.reduce((a, b) => a + b, 0)).toBe(r.committed.reduce((a, b) => a + b, 0));
-          if (r.endedBy === 'fold') expect(burned).toBe(0);
+          if (r.endedBy === 'fold') expect(r.bonus.reduce((a, b) => a + b, 0)).toBe(0);
           for (const seat of r.eliminated) expect(s.roster.out[r.after[seat]!.seat]).toBe(r.round);
           // Bonus only hits players who showed down and lost.
           r.bonus.forEach((b, seat) => b > 0 && expect(r.showdown).toContain(seat));

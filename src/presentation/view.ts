@@ -75,9 +75,15 @@ export function reduceView(v: TableView, e: GameEvent): TableView {
       const bets = [...v.bets];
       const say = [...v.say];
       const folded = [...v.folded];
-      hp[e.seat]! -= e.amount;
+      hp[e.seat]! -= e.amount + (e.penalty ?? 0);
       bets[e.seat] = e.to;
-      say[e.seat] = e.allIn ? 'オールイン' : e.kind === 'bet' || e.kind === 'raise' ? `${SAY[e.kind]} ${e.to}` : SAY[e.kind];
+      say[e.seat] = e.allIn
+        ? 'オールイン'
+        : e.kind === 'bet' || e.kind === 'raise'
+          ? `${SAY[e.kind]} ${e.to}`
+          : e.kind === 'fold' && e.penalty
+            ? `${SAY.fold} −${e.penalty}`
+            : SAY[e.kind];
       if (e.kind === 'fold') folded[e.seat] = true;
       return { ...v, hp, bets, say, folded };
     }

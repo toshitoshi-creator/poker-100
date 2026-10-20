@@ -1,5 +1,5 @@
 import { decide } from './ai';
-import { anteFor, effectTier, handBonus, type EffectTier } from './combat';
+import { anteFor, effectTier, foldPenalty, handBonus, type EffectTier } from './combat';
 import { assertUnique, createDeck, shuffle } from './deck';
 import { compareHands, evaluateBest, type HandResult } from './handEvaluator';
 import type { Fighter } from './hp';
@@ -25,7 +25,8 @@ export type RaiseSize = 'half' | 'pot' | 'allin';
 
 export type PlayerAction = { type: 'fold' } | { type: 'check' } | { type: 'call' } | { type: 'raise'; size: RaiseSize };
 /** `amount`: chips this action puts in. `to`: the seat's street bet afterwards. */
-export type LegalAction = PlayerAction & { amount: number; to: number };
+/** `penalty`: fold damage (fold only). */
+export type LegalAction = PlayerAction & { amount: number; to: number; penalty?: number };
 
 export interface TableDeal {
   /** Hole cards by table seat (null = empty seat). */
@@ -47,7 +48,16 @@ export type GameEvent =
       blinds: { seat: number; amount: number; kind: 'sb' | 'bb' }[];
       survivors: number;
     }
-  | { t: 'act'; seat: number; kind: 'fold' | 'check' | 'call' | 'bet' | 'raise'; amount: number; to: number; allIn: boolean }
+  | {
+      t: 'act';
+      seat: number;
+      kind: 'fold' | 'check' | 'call' | 'bet' | 'raise';
+      amount: number;
+      to: number;
+      allIn: boolean;
+      /** Fold damage burned from the seat (fold only). */
+      penalty?: number;
+    }
   | { t: 'street'; street: Exclude<Street, 'preflop'> }
   | { t: 'showdown'; seats: number[] }
   | { t: 'award'; result: RoundResult };
@@ -62,6 +72,8 @@ export interface HandState {
   inHand: boolean[];
   /** Chips each seat has put in this hand. */
   committed: number[];
+  /** Fold damage taken this hand (burned, not in the pot). */
+  penalty: number[];
   /** Chips each seat has put in this street. */
   streetBet: number[];
   /** Has acted since the last bet/raise. */
@@ -102,6 +114,8 @@ export interface RoundResult {
   tier: EffectTier;
   /** Hand-bonus damage taken per seat (burned, not transferred). */
   bonus: number[];
+  /** Fold damage taken per seat (burned). */
+  penalty: number[];
   /** Table seats knocked out this hand. */
   eliminated: number[];
   /** Fighters before the blinds / after the hand (before refills). */
@@ -218,6 +232,7 @@ function clone(h: HandState): HandState {
     committed: [...h.committed],
     streetBet: [...h.streetBet],
     acted: [...h.acted],
+    penalty: [...h.penalty],
   };
 }
 
@@ -248,7 +263,7 @@ function legalFor(w: Work, i: number): LegalAction[] {
   const sb = h.streetBet[i]!;
   const out: LegalAction[] = [];
   if (toCall > 0) {
-    out.push({ type: 'fold', amount: 0, to: sb });
+    out.push({ type: 'fold', amount: 0, to: sb, penalty: Math.min(w.hp[i]!, foldPenalty(h.bb)) });
     const amt = Math.min(toCall, w.hp[i]!);
     out.push({ type: 'call', amount: amt, to: sb + amt });
   } else {
@@ -280,7 +295,10 @@ function apply(w: Work, i: number, kind: 'fold' | 'check' | 'call' | 'raise', to
   const h = w.hand;
   if (kind === 'fold') {
     h.inHand[i] = false;
-    w.events.push({ t: 'act', seat: i, kind: 'fold', amount: 0, to: h.streetBet[i]!, allIn: false });
+    const penalty = Math.min(w.hp[i]!, foldPenalty(h.bb));
+    w.hp[i] = w.hp[i]! - penalty;
+    h.penalty[i] = h.penalty[i]! + penalty;
+    w.events.push({ t: 'act', seat: i, kind: 'fold', amount: 0, to: h.streetBet[i]!, allIn: false, penalty });
   } else if (kind === 'check') {
     w.events.push({ t: 'act', seat: i, kind: 'check', amount: 0, to: h.streetBet[i]!, allIn: false });
   } else if (kind === 'call') {
@@ -315,6 +333,7 @@ function aiAct(w: Work, i: number) {
     stack: w.hp[i]!,
     raise: raiseRange(w, i),
     currentBet: h.currentBet,
+    foldCost: Math.min(w.hp[i]!, foldPenalty(h.bb)),
     rng,
   });
   if (d.type === 'raise') apply(w, i, 'raise', d.to);
@@ -407,6 +426,7 @@ export function startHand(state: GameState): GameState {
     committed: Array(n).fill(0),
     streetBet: Array(n).fill(0),
     acted: Array(n).fill(false),
+    penalty: Array(n).fill(0),
     currentBet: 0,
     minRaise: bb,
     raises: 0,
@@ -569,6 +589,7 @@ function settle(w: Work): GameState {
     featuredHand,
     tier: featuredHand ? effectTier(featuredHand.category) : 0,
     bonus,
+    penalty: hand.penalty,
     eliminated,
     before: start.seats,
     after,
