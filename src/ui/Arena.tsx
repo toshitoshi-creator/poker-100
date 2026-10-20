@@ -1,4 +1,5 @@
 import { memo } from 'react';
+import logoUrl from '../assets/logo.webp';
 import { aliveSeats, seatName, TOTAL_PLAYERS, type GameState } from '../logic/game';
 
 interface Props {
@@ -32,7 +33,7 @@ export const Arena = memo(function Arena({ game, mode, onJoin, onClose }: Props)
   return (
     <div className={`arena is-${mode}`} data-arena aria-hidden={mode === 'hidden'}>
       <header className="arena-chrome arena-head">
-        <div className="arena-title">100人サバイバル</div>
+        <img className="arena-logo" src={logoUrl} alt="Poker Survival" width={640} height={301} draggable={false} />
         <div className="arena-stats">
           <span>
             残り <b data-testid="arena-alive">{alive}</b>人

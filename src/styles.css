@@ -877,11 +877,13 @@ body {
   max-width: 420px;
   text-align: center;
 }
-.arena-title {
-  font-size: 22px;
-  font-weight: 900;
-  letter-spacing: 0.12em;
-  color: var(--gold);
+.arena-logo {
+  display: block;
+  width: auto;
+  height: clamp(72px, 17dvh, 150px);
+  max-width: 100%;
+  margin: 0 auto 2px;
+  object-fit: contain;
 }
 .arena-stats {
   display: flex;
@@ -1039,5 +1041,25 @@ body {
   .arena.is-lobby .tile,
   .arena.is-lobby .tile.is-you {
     animation: none;
+  }
+}
+
+/* Short screens: keep logo, grid and the join button on one screen (must follow the arena rules). */
+@media (max-height: 700px) {
+  .arena {
+    gap: 6px;
+    padding-top: 6px;
+  }
+  .arena-logo {
+    height: 12dvh;
+  }
+  .arena-grid {
+    width: min(100%, 46dvh);
+  }
+  .arena-foot {
+    gap: 6px;
+  }
+  .arena-foot p {
+    font-size: 12px;
   }
 }

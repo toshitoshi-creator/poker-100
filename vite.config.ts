@@ -4,8 +4,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  // Inline small assets (the 9KB card back) so the single-file build stays self-contained.
-  build: { assetsInlineLimit: 16 * 1024 },
+  // Inline the image assets (card back 9KB, logo 85KB) so the single-file build stays self-contained.
+  build: { assetsInlineLimit: 128 * 1024 },
   test: {
     environment: 'jsdom',
     globals: true,
