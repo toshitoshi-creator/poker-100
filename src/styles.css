@@ -7,8 +7,11 @@
   --gold: #f5c84c;
   --red: #d8323c;
   --cyan: #4fd6ff;
-  --card-face: #fbfaf5;
-  --card-ink: #16181d;
+  /* Card fronts: black face, gold frame (matches the back's frame), light ink. */
+  --card-face: #0c0c0e;
+  --card-ink: #f3ecda;
+  --card-red: #ff4b57;
+  --gold-frame: linear-gradient(135deg, #fae296 0%, #b07e26 30%, #f6d27a 55%, #a8781f 80%, #f2d48a 100%);
   /* Five board cards + gaps must fit a 320px wide screen. */
   --cw: min(16.5vw, 74px, 9.5dvh);
   --ch: calc(var(--cw) * 1.4);
@@ -368,12 +371,22 @@ body {
 .card-front {
   /* Shows when .card-inner is at rotateY(180deg). */
   transform: rotateY(180deg);
-  background: var(--card-face);
+  border: calc(var(--cw) * 0.045) solid transparent;
+  background:
+    radial-gradient(ellipse at 50% 35%, #1c1c20, var(--card-face) 70%) padding-box,
+    var(--gold-frame) border-box;
   color: var(--card-ink);
   visibility: hidden;
 }
 .card-front.is-red {
-  color: var(--red);
+  color: var(--card-red);
+}
+.card-front .pip.face {
+  /* J / Q / K letters in gold. */
+  background: var(--gold-frame);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .corner {
   position: absolute;
@@ -951,8 +964,7 @@ body {
   width: 22%;
   height: 34%;
   border-radius: 1.5px;
-  background: #b3212c;
-  box-shadow: 0 0 0 1px #fbfaf5;
+  background: url('./assets/card-back.webp') center / 100% 100% no-repeat;
 }
 .tile-cards::before {
   left: 26%;
