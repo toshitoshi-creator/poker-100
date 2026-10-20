@@ -1,5 +1,5 @@
 import gsap from 'gsap';
-import { TABLE_SIZE, type GameEvent, type RoundResult } from '../logic/game';
+import { MAX_TABLE_SIZE, type GameEvent, type RoundResult } from '../logic/game';
 import { mulberry32 } from '../logic/rng';
 import type { SoundBus, SoundId } from '../audio/soundBus';
 import type { MotionProfile } from './motion';
@@ -33,8 +33,8 @@ export interface Presenter {
 
 export const PARTICLE_POOL = 28;
 /** Three chip tokens per seat lane, so simultaneous flights never share a token. */
-export const CHIP_POOL = TABLE_SIZE * 3;
-export const PROJECTILE_POOL = TABLE_SIZE;
+export const CHIP_POOL = MAX_TABLE_SIZE * 3;
+export const PROJECTILE_POOL = MAX_TABLE_SIZE;
 
 const TIER_FX = [
   { particles: 0, shake: 0, flash: 0, hold: 0.7 },
@@ -44,7 +44,8 @@ const TIER_FX = [
   { particles: 28, shake: 12, flash: 0.6, hold: 1.4 },
 ] as const;
 
-const SEATS = Array.from({ length: TABLE_SIZE }, (_, i) => i);
+/** Seat indices of a view (2 or 6 seats). */
+const seatsOf = (v: { hp: number[] }) => v.hp.map((_, i) => i);
 const hole = (seat: number, k: number) => `h${seat}-${k}`;
 
 export interface DirectorOptions {
@@ -201,7 +202,7 @@ export class Director implements Presenter {
     }
 
     if (r) for (const s of r.showdown) gsap.set(this.all(`[data-label="${s}"]`), { autoAlpha: 1 });
-    for (const seat of SEATS) {
+    for (const seat of seatsOf(v)) {
       const out = !!v.result?.eliminated.includes(seat);
       gsap.set(this.all(`[data-avatar="${seat}"]`), out ? { autoAlpha: 0.35, y: 4, rotation: -6, scale: 1 } : { autoAlpha: 1, y: 0, rotation: 0, scale: 1 });
       gsap.set(this.all(`[data-ko="${seat}"]`), out ? { autoAlpha: 1, scale: 1, rotation: -12 } : { autoAlpha: 0 });
@@ -239,7 +240,7 @@ export class Director implements Presenter {
         }
         this.set(tl, { bets: after.bets, say: after.say }, `${at}+=0.3`);
         // Deal two rounds, one card at a time, starting left of the button.
-        const order = SEATS.map((k) => (e.button + 1 + k) % TABLE_SIZE).filter((s) => e.seats[s] && e.seats[s]!.hp > 0);
+        const order = e.seats.map((_, k) => (e.button + 1 + k) % e.seats.length).filter((s) => e.seats[s] && e.seats[s]!.hp > 0);
         let n = 0;
         for (const k of [0, 1]) for (const s of order) this.fly(tl, hole(s, k), `${at}+=${0.5 + n++ * 0.08}`, 0.35);
         const flipAt = L('holeFlip');
@@ -308,7 +309,7 @@ export class Director implements Presenter {
 
   /** Bets in front of the seats slide into the middle. */
   private sweep(tl: Tl, before: TableView, after: TableView, at: string) {
-    const betting = SEATS.filter((s) => before.bets[s]! > 0);
+    const betting = seatsOf(before).filter((s) => before.bets[s]! > 0);
     if (!betting.length) return;
     for (const s of betting) this.chips(tl, `bet:${s}`, 'pot', at, s);
     this.set(tl, { bets: after.bets, say: after.say }, `${at}+=0.3`);
@@ -354,7 +355,7 @@ export class Director implements Presenter {
     tl.addLabel(pay, `${handEnd}+=0.15`);
     this.cue(tl, 'chips', pay);
     const hp = [...before.hp];
-    for (const s of SEATS) {
+    for (const s of seatsOf(before)) {
       const won = r.payout[s]!;
       if (!won) continue;
       this.chips(tl, 'pot', s, pay, s);
@@ -370,7 +371,7 @@ export class Director implements Presenter {
     this.num(tl, 'pot', before.pot + before.bets.reduce((a, b) => a + b, 0), 0, 0.5, `${pay}+=0.3`);
 
     // Hand bonus: the best hand strikes everyone else who showed down.
-    const targets = SEATS.filter((s) => r.bonus[s]! > 0);
+    const targets = seatsOf(before).filter((s) => r.bonus[s]! > 0);
     if (targets.length) {
       const atk = `attack${++this.label}`;
       tl.addLabel(atk, `${pay}+=0.9`);

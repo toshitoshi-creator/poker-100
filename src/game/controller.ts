@@ -1,4 +1,13 @@
-import { createGame, legalActions, playerAct, startHand, type GameState, type LegalAction, type PlayerAction } from '../logic/game';
+import {
+  createGame,
+  legalActions,
+  playerAct,
+  startHand,
+  type GameState,
+  type LegalAction,
+  type PlayerAction,
+  type TableSize,
+} from '../logic/game';
 import type { Presenter } from '../presentation/director';
 
 /**
@@ -11,8 +20,8 @@ export class GameController {
   private presenter: Presenter | null = null;
   private readonly listeners = new Set<() => void>();
 
-  constructor(seed: number) {
-    this.state = createGame(seed);
+  constructor(seed: number, tableSize?: TableSize) {
+    this.state = createGame(seed, tableSize);
   }
 
   getState = (): GameState => this.state;
@@ -50,9 +59,10 @@ export class GameController {
     this.presenter?.play(this.state.lastLog, 0, { intro: false });
   }
 
-  reset(seed: number): void {
+  /** New game. Keeps the current table size unless one is given. */
+  reset(seed: number, tableSize: TableSize = this.state.seats.length as TableSize): void {
     this.presenter?.reset();
-    this.state = createGame(seed);
+    this.state = createGame(seed, tableSize);
     this.emit();
   }
 

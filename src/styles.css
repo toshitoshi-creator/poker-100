@@ -1428,3 +1428,101 @@ body {
   padding: 1px 6px;
   font-size: 10px;
 }
+
+/* ---- Heads-up (default): one opponent across the table, bigger and roomier. ---- */
+.stage--heads-up .ring--top {
+  justify-content: center;
+}
+.seat--solo {
+  --cw-s: calc(var(--cw) * 0.95);
+}
+.seat.seat--solo {
+  width: 72%;
+  max-width: 300px;
+}
+.seat--solo .seat-cards {
+  gap: 6px;
+}
+.seat--solo .card--sm + .card--sm {
+  margin-left: 0;
+}
+.seat--solo .card--sm .corner.br {
+  display: block;
+}
+.seat--solo .seat-plate {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+}
+.seat.seat--solo .avatar {
+  font-size: 13px;
+}
+.seat.seat--solo .avatar-icon {
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
+}
+.seat.seat--solo .hp-track {
+  height: 8px;
+}
+.seat.seat--solo .hp-num b {
+  font-size: 15px;
+}
+.seat.seat--solo .ko-stamp {
+  font-size: 26px;
+  border-width: 3px;
+}
+.seat.seat--solo .hand-label {
+  font-size: 12px;
+}
+.stage--heads-up {
+  --cw: min(16vw, 70px, 8.4dvh);
+  justify-content: space-around;
+}
+
+/* Lobby: heads-up / six-max switch. */
+.table-size {
+  display: inline-flex;
+  align-self: center;
+  padding: 3px;
+  border-radius: 99px;
+  background: #00000066;
+  border: 1px solid #ffffff22;
+}
+.table-size-opt {
+  min-width: 84px;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 99px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.table-size-opt.is-on {
+  background: var(--gold);
+  color: #241a00;
+}
+.table-size-opt:focus-visible {
+  outline: 2px solid var(--cyan);
+}
+/* Heads-up opponent: dealer chip sits just after the name, not on it. */
+.seat.seat--solo .avatar {
+  margin-right: 16px;
+}
+.seat--solo .dealer-chip {
+  top: 50%;
+  right: -22px;
+  transform: translateY(-50%);
+}
+@media (max-height: 700px) {
+  .table-size-opt {
+    min-height: 28px;
+    font-size: 12px;
+  }
+}

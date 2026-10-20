@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { App } from '../src/App';
-import { createGame, legalActions, playerAct, startHand, TABLE_SIZE, type GameState, type PlayerAction } from '../src/logic/game';
+import { createGame, legalActions, playerAct, startHand, type GameState, type PlayerAction } from '../src/logic/game';
 import { mulberry32 } from '../src/logic/rng';
 import { currentLog, viewAt } from '../src/presentation/view';
 import { autoplay } from './helpers/autoplay';
@@ -34,7 +34,7 @@ function join(state: GameState): GameState {
 /** Everything the screen shows matches the decided state. */
 function expectScreenMatches(s: GameState) {
   const r = s.hand ? null : s.lastRound;
-  for (let i = 0; i < TABLE_SIZE; i++) {
+  for (let i = 0; i < s.seats.length; i++) {
     const f = r ? r.after[i] : s.seats[i];
     if (!f) continue;
     expect(num(`hp-${i}`)).toBe(f.hp);
@@ -45,12 +45,15 @@ function expectScreenMatches(s: GameState) {
   expect(num('pot')).toBe(expectedPot);
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear(); // the lobby remembers the table size
+});
 
 describe('view reducer', () => {
   it('replaying any hand log lands on the logic state', () => {
     for (const seed of [1, 2, 3, 6]) {
-      for (const s of autoplay(seed, 150)) {
+      for (const s of autoplay(seed, 150, undefined, seed % 2 ? 2 : 6)) {
         const log = currentLog(s);
         if (!log.length) continue;
         const v = viewAt(log, log.length);
@@ -70,35 +73,53 @@ describe('view reducer', () => {
 });
 
 describe('presentation', () => {
-  it('opens on the 100-player lobby and zooms into the table on join', () => {
+  it('opens on the 100-player lobby (heads-up by default) and zooms into the table on join', () => {
     render(<App seed={42} />);
     const arena = document.querySelector('[data-arena]')!;
     expect(arena.classList.contains('is-lobby')).toBe(true);
     expect(visible(arena)).toBe(true);
     expect(document.querySelectorAll('[data-tile]')).toHaveLength(100);
-    expect(document.querySelectorAll('[data-tile].is-opp')).toHaveLength(5);
+    expect(document.querySelectorAll('[data-tile].is-opp')).toHaveLength(1);
+    expect(screen.getByTestId('table-2').getAttribute('aria-checked')).toBe('true');
     const s = join(createGame(42));
     expect(isPlaying()).toBe(true);
     click(primary()!); // skip the intro + deal (+ AI actions)
     expect(visible(arena)).toBe(false);
     expect(visible(document.querySelector('[data-stage]'))).toBe(true);
+    expect(document.querySelectorAll('[data-seat]')).toHaveLength(2);
     expectScreenMatches(s);
   });
 
-  it('six seats are dealt; only your cards are face up until showdown', () => {
+  it('the lobby switch starts a six-max game; only your cards are face up until showdown', () => {
     render(<App seed={42} />);
-    const s = join(createGame(42));
+    click(screen.getByTestId('table-6'));
+    expect(document.querySelectorAll('[data-tile].is-opp')).toHaveLength(5);
+    const s = join(createGame(42, 6));
     click(primary()!);
-    expect(document.querySelectorAll('[data-seat]')).toHaveLength(TABLE_SIZE);
+    expect(document.querySelectorAll('[data-seat]')).toHaveLength(6);
+    expectScreenMatches(s);
     if (s.hand) {
       expect(visible(document.querySelector('[data-card="h0-0"] .card-front'))).toBe(true);
-      for (let i = 1; i < TABLE_SIZE; i++) {
+      for (let i = 1; i < 6; i++) {
         if (!s.hand.deal.hole[i]) continue;
         expect(visible(document.querySelector(`[data-card="h${i}-0"]`))).toBe(true);
         expect(visible(document.querySelector(`[data-card="h${i}-0"] .card-front`))).toBe(false);
       }
-      expect(screen.queryByTestId('act-fold') ?? screen.queryByTestId('act-check')).not.toBeNull();
     }
+  });
+
+  it('remembers the table size for the next visit', () => {
+    render(<App seed={1} />);
+    click(screen.getByTestId('table-6'));
+    cleanup();
+    render(<App seed={1} />);
+    expect(screen.getByTestId('table-6').getAttribute('aria-checked')).toBe('true');
+    expect(document.querySelectorAll('[data-seat]')).toHaveLength(6);
+  });
+
+  it('six-max: a full hand lands on the decided numbers', () => {
+    render(<App seed={3453} tableSize={6} />);
+    expectScreenMatches(playHandPassively(createGame(3453, 6)));
   });
 
   it('a full hand ends with every effect element at rest and the right numbers', () => {

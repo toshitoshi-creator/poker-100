@@ -1,4 +1,4 @@
-import { createGame, legalActions, playerAct, startHand, type GameState, type PlayerAction } from '../../src/logic/game';
+import { createGame, legalActions, playerAct, startHand, type GameState, type PlayerAction, type TableSize } from '../../src/logic/game';
 import { mulberry32 } from '../../src/logic/rng';
 
 /** Deterministic "player" that picks random legal actions (folds less often than it could). */
@@ -13,8 +13,8 @@ export function randomPolicy(seed: number) {
 }
 
 /** Every intermediate state of a game, until it ends or maxSteps. */
-export function autoplay(seed: number, maxSteps = 300, policy = randomPolicy(seed)): GameState[] {
-  const states = [createGame(seed)];
+export function autoplay(seed: number, maxSteps = 300, policy = randomPolicy(seed), tableSize?: TableSize): GameState[] {
+  const states = [createGame(seed, tableSize)];
   for (let i = 0; i < maxSteps; i++) {
     const s = states.at(-1)!;
     if (s.status !== 'playing') break;

@@ -7,8 +7,12 @@ import { deriveSeed, mulberry32, randInt } from './rng';
 import type { Card } from './types';
 
 export const TOTAL_PLAYERS = 100;
-/** Six-max table. Seat 0 is always you; seats go clockwise from there. */
-export const TABLE_SIZE = 6;
+/** Players per table: heads-up (default) or six-max. Seat 0 is always you; seats go clockwise. */
+export type TableSize = 2 | 6;
+export const TABLE_SIZES: readonly TableSize[] = [2, 6];
+export const DEFAULT_TABLE_SIZE: TableSize = 2;
+/** Largest table the UI has to lay out. */
+export const MAX_TABLE_SIZE = 6;
 export const START_HP = 100;
 /** A player who sits down mid-game brings this much HP (they survived elsewhere). */
 export const NEWCOMER_HP: [number, number] = [60, 120];
@@ -143,9 +147,9 @@ export function aliveSeats(r: Roster): number[] {
 
 export const you = (g: GameState): Fighter => g.seats[0]!;
 
-const nextSeat = (from: number, ok: (i: number) => boolean): number => {
-  for (let k = 1; k <= TABLE_SIZE; k++) {
-    const i = (from + k) % TABLE_SIZE;
+const nextSeat = (n: number, from: number, ok: (i: number) => boolean): number => {
+  for (let k = 1; k <= n; k++) {
+    const i = (from + k) % n;
     if (ok(i)) return i;
   }
   return -1;
@@ -163,7 +167,7 @@ function refill(seats: (Fighter | null)[], roster: Roster, rng: () => number, hp
     rng,
   );
   const joined: number[] = [];
-  for (let s = 1; s < TABLE_SIZE; s++) {
+  for (let s = 1; s < seats.length; s++) {
     if (seats[s] || !pool.length) continue;
     seats[s] = newcomer(pool.shift()!, hp());
     joined.push(s);
@@ -171,12 +175,12 @@ function refill(seats: (Fighter | null)[], roster: Roster, rng: () => number, hp
   return joined;
 }
 
-export function createGame(seed: number): GameState {
+export function createGame(seed: number, tableSize: TableSize = DEFAULT_TABLE_SIZE): GameState {
   const s = seed >>> 0;
   const rng = mulberry32(deriveSeed(s, 0x5ea7));
   const youIdx = randInt(rng, 0, TOTAL_PLAYERS - 1);
   const roster: Roster = { you: youIdx, out: Array.from({ length: TOTAL_PLAYERS }, () => null) };
-  const seats: (Fighter | null)[] = Array.from({ length: TABLE_SIZE }, () => null);
+  const seats: (Fighter | null)[] = Array.from({ length: tableSize }, () => null);
   seats[0] = { id: 'you', name: 'YOU', seat: youIdx, hp: START_HP, maxHp: START_HP };
   refill(seats, roster, rng, () => START_HP);
   return {
@@ -184,7 +188,7 @@ export function createGame(seed: number): GameState {
     roster,
     round: 0,
     seats,
-    button: randInt(rng, 0, TABLE_SIZE - 1),
+    button: randInt(rng, 0, tableSize - 1),
     joined: [],
     survivors: TOTAL_PLAYERS,
     status: 'playing',
@@ -335,7 +339,7 @@ function nextStreet(w: Work, street: Exclude<Street, 'preflop'>) {
   h.minRaise = h.bb;
   h.raises = 0;
   w.events.push({ t: 'street', street });
-  h.toAct = nextSeat(h.button, (i) => canAct(w, i));
+  h.toAct = nextSeat(h.inHand.length, h.button, (i) => canAct(w, i));
 }
 
 /** Run AI turns until it is your move or the hand is over. */
@@ -358,12 +362,12 @@ function advance(w: Work): GameState {
     }
     const i = h.toAct;
     if (!canAct(w, i) || (h.acted[i] && h.streetBet[i] === h.currentBet)) {
-      h.toAct = nextSeat(i, (j) => canAct(w, j));
+      h.toAct = nextSeat(h.inHand.length, i, (j) => canAct(w, j));
       continue;
     }
     if (i === 0) return pause(w);
     aiAct(w, i);
-    h.toAct = nextSeat(i, (j) => canAct(w, j));
+    h.toAct = nextSeat(h.inHand.length, i, (j) => canAct(w, j));
   }
   throw new Error('betting did not terminate');
 }
@@ -377,16 +381,17 @@ export function startHand(state: GameState): GameState {
   const round = state.round + 1;
   const seed = deriveSeed(state.seed, round);
   const rng = mulberry32(seed);
-  const button = nextSeat(state.button, occupied);
+  const n = state.seats.length;
+  const button = nextSeat(n, state.button, occupied);
   const headsUp = players.length === 2;
-  const sbSeat = headsUp ? button : nextSeat(button, occupied);
-  const bbSeat = nextSeat(sbSeat, occupied);
+  const sbSeat = headsUp ? button : nextSeat(n, button, occupied);
+  const bbSeat = nextSeat(n, sbSeat, occupied);
   const bb = anteFor(round);
   const sbAmt = Math.max(1, Math.floor(bb / 2));
 
   let deck = shuffle(createDeck(), rng);
-  const hole: ([Card, Card] | null)[] = Array.from({ length: TABLE_SIZE }, () => null);
-  for (let k = 0, i = sbSeat; k < players.length; k++, i = nextSeat(i, occupied)) hole[i] = [deck[k]!, deck[k + players.length]!];
+  const hole: ([Card, Card] | null)[] = Array.from({ length: n }, () => null);
+  for (let k = 0, i = sbSeat; k < players.length; k++, i = nextSeat(n, i, occupied)) hole[i] = [deck[k]!, deck[k + players.length]!];
   deck = deck.slice(players.length * 2);
   const board = [deck[1]!, deck[2]!, deck[3]!, deck[5]!, deck[7]!]; // burn before flop, turn, river
   assertUnique([...hole.flatMap((h) => h ?? []), ...board]);
@@ -399,9 +404,9 @@ export function startHand(state: GameState): GameState {
     button,
     bb,
     inHand: hole.map(Boolean),
-    committed: Array(TABLE_SIZE).fill(0),
-    streetBet: Array(TABLE_SIZE).fill(0),
-    acted: Array(TABLE_SIZE).fill(false),
+    committed: Array(n).fill(0),
+    streetBet: Array(n).fill(0),
+    acted: Array(n).fill(false),
     currentBet: 0,
     minRaise: bb,
     raises: 0,
@@ -413,7 +418,7 @@ export function startHand(state: GameState): GameState {
   const sbPaid = pay(w, sbSeat, sbAmt);
   const bbPaid = pay(w, bbSeat, bb);
   hand.currentBet = Math.max(...hand.streetBet);
-  hand.toAct = nextSeat(bbSeat, (i) => canAct(w, i));
+  hand.toAct = nextSeat(n, bbSeat, (i) => canAct(w, i));
   w.events.push({
     t: 'start',
     round,
@@ -436,7 +441,7 @@ export function playerAct(state: GameState, action: PlayerAction): GameState {
   const legal = legalFor(w, 0).find((l) => l.type === action.type && (l.type !== 'raise' || (action.type === 'raise' && l.size === action.size)));
   if (!legal) return state;
   apply(w, 0, legal.type, legal.to);
-  w.hand.toAct = nextSeat(0, (j) => canAct(w, j));
+  w.hand.toAct = nextSeat(w.hand.inHand.length, 0, (j) => canAct(w, j));
   return advance(w);
 }
 
@@ -481,7 +486,8 @@ function settle(w: Work): GameState {
     isShowdown && hand.inHand[i] && h ? evaluateBest([...h, ...hand.deal.board]) : null,
   );
   const pots = buildPots(hand.committed, hand.inHand);
-  const payout: number[] = Array(TABLE_SIZE).fill(0);
+  const n = hand.inHand.length;
+  const payout: number[] = Array(n).fill(0);
   for (const pot of pots) {
     let best: number[] = [];
     for (const i of pot.eligible) {
@@ -499,14 +505,14 @@ function settle(w: Work): GameState {
     // Odd chip goes to the first winner left of the button.
     const odd = pot.amount - share * best.length;
     if (odd) {
-      const k = nextSeat(hand.button, (i) => best.includes(i));
+      const k = nextSeat(n, hand.button, (i) => best.includes(i));
       payout[k] = payout[k]! + odd;
     }
   }
   const hp = w.hp.map((v, i) => v + payout[i]!);
 
   // Hand bonus: a unique best hand at showdown hits everyone else who showed down.
-  const bonus: number[] = Array(TABLE_SIZE).fill(0);
+  const bonus: number[] = Array(n).fill(0);
   let featuredSeat = pots[0]?.winners[0] ?? live[0]!;
   let featuredHand: HandResult | null = null;
   if (isShowdown) {

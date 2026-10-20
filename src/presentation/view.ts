@@ -1,5 +1,5 @@
 import type { Fighter } from '../logic/hp';
-import { TABLE_SIZE, type GameEvent, type GameState, type RoundResult } from '../logic/game';
+import type { GameEvent, GameState, RoundResult } from '../logic/game';
 import type { Phase } from './store';
 
 /**
@@ -26,7 +26,7 @@ export interface TableView {
   result: RoundResult | null;
 }
 
-const blank = <T,>(v: T) => Array.from({ length: TABLE_SIZE }, () => v);
+const blank = <T,>(n: number, v: T) => Array.from({ length: n }, () => v);
 const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
 
 function base(seats: (Fighter | null)[], round: number, survivors: number, button: number): TableView {
@@ -34,15 +34,15 @@ function base(seats: (Fighter | null)[], round: number, survivors: number, butto
     round,
     dealt: false,
     boardShown: 0,
-    revealed: blank(false),
-    folded: blank(false),
+    revealed: blank(seats.length, false),
+    folded: blank(seats.length, false),
     seats,
     hp: seats.map((f) => f?.hp ?? 0),
-    bets: blank(0),
+    bets: blank(seats.length, 0),
     pot: 0,
     survivors,
     button,
-    say: blank(''),
+    say: blank(seats.length, ''),
     phase: 'idle',
     result: null,
   };
@@ -85,7 +85,7 @@ export function reduceView(v: TableView, e: GameEvent): TableView {
       return {
         ...v,
         pot: v.pot + sum(v.bets),
-        bets: blank(0),
+        bets: v.bets.map(() => 0),
         boardShown: e.street === 'flop' ? 3 : e.street === 'turn' ? 4 : 5,
         phase: e.street,
         say: v.say.map((s, i) => (v.folded[i] ? s : '')),
@@ -94,7 +94,7 @@ export function reduceView(v: TableView, e: GameEvent): TableView {
       return {
         ...v,
         pot: v.pot + sum(v.bets),
-        bets: blank(0),
+        bets: v.bets.map(() => 0),
         revealed: v.revealed.map((r, i) => r || e.seats.includes(i)),
         phase: 'showdown',
         say: v.say.map((s, i) => (v.folded[i] ? s : '')),
@@ -105,7 +105,7 @@ export function reduceView(v: TableView, e: GameEvent): TableView {
         hp: e.result.after.map((f) => f?.hp ?? 0),
         seats: e.result.after,
         pot: 0,
-        bets: blank(0),
+        bets: v.bets.map(() => 0),
         survivors: e.result.survivors.after,
         phase: 'result',
         result: e.result,

@@ -33,6 +33,7 @@ export function Table({ game, store, yourTurn }: Props) {
   const round = game.hand?.round ?? result?.round ?? 0;
   const seats = result ? result.after : game.seats;
   const bb = anteFor(game.hand ? game.hand.round : game.round + 1);
+  const headsUp = seats.length === 2;
   const name = (i: number) => (i === 0 ? 'YOU' : seats[i]?.name ?? '');
 
   let banner: { ja: string; en: string; sub: string } | null = null;
@@ -56,6 +57,7 @@ export function Table({ game, store, yourTurn }: Props) {
     <Seat
       key={i}
       seat={i}
+      tableSize={seats.length}
       fighter={seats[i] ?? null}
       hole={deal?.hole[i] ?? null}
       round={round}
@@ -66,8 +68,8 @@ export function Table({ game, store, yourTurn }: Props) {
   );
 
   return (
-    <div className="stage" data-stage>
-      <div className="ring ring--top">{[2, 3, 4].map(seat)}</div>
+    <div className={`stage stage--${headsUp ? 'heads-up' : 'six'}`} data-stage>
+      <div className="ring ring--top">{headsUp ? seat(1) : [2, 3, 4].map(seat)}</div>
       <section className="felt">
         <div className="felt-center">
           <div className="deck" data-deck aria-label="山札">
@@ -83,10 +85,12 @@ export function Table({ game, store, yourTurn }: Props) {
             : Array.from({ length: 5 }, (_, i) => <EmptySlot key={i} />)}
         </div>
       </section>
-      <div className="ring ring--mid">
-        {seat(1)}
-        {seat(5)}
-      </div>
+      {!headsUp && (
+        <div className="ring ring--mid">
+          {seat(1)}
+          {seat(5)}
+        </div>
+      )}
       {seat(0)}
 
       <div className="fx-layer" aria-hidden>

@@ -6,11 +6,15 @@ import { useStore, type PresentationState, type Store } from '../presentation/st
 import { CardView, EmptySlot } from './CardView';
 import { HpBar } from './HpBar';
 
-/** Where a table seat sits on the portrait screen (seat 0 = you, then clockwise). */
-export const SEAT_POS = ['hero', 'left', 'top-left', 'top', 'top-right', 'right'] as const;
+/** Where a table seat sits on the portrait screen (seat 0 = you, then clockwise), per table size. */
+export const SEAT_POS: Record<number, readonly string[]> = {
+  2: ['hero', 'solo'],
+  6: ['hero', 'left', 'top-left', 'top', 'top-right', 'right'],
+};
 
 interface Props {
   seat: number;
+  tableSize: number;
   fighter: Fighter | null;
   hole: readonly [Card, Card] | null;
   round: number;
@@ -55,8 +59,8 @@ function Marks({ seat, store }: { seat: number; store: Store<PresentationState> 
   );
 }
 
-export function Seat({ seat, fighter, hole, round, result, store, yourTurn }: Props) {
-  const pos = SEAT_POS[seat]!;
+export function Seat({ seat, tableSize, fighter, hole, round, result, store, yourTurn }: Props) {
+  const pos = SEAT_POS[tableSize]?.[seat] ?? 'top';
   const hero = seat === 0;
   if (!fighter) {
     return (

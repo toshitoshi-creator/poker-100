@@ -1,13 +1,17 @@
 import { memo } from 'react';
 import logoUrl from '../assets/logo.webp';
-import { aliveSeats, seatName, TOTAL_PLAYERS, type GameState } from '../logic/game';
+import { aliveSeats, seatName, TABLE_SIZES, TOTAL_PLAYERS, type GameState, type TableSize } from '../logic/game';
 
 interface Props {
   game: GameState;
   mode: 'hidden' | 'lobby' | 'open';
   onJoin(): void;
   onClose(): void;
+  tableSize: TableSize;
+  onTableSize(t: TableSize): void;
 }
+
+const TABLE_LABEL: Record<TableSize, string> = { 2: '1対1', 6: '6人卓' };
 
 const COLS = 10;
 
@@ -22,7 +26,7 @@ function ring(i: number): number {
  * All 100 players' screens. Pure layout from the (already decided) roster;
  * the Director zooms it in and out.
  */
-export const Arena = memo(function Arena({ game, mode, onJoin, onClose }: Props) {
+export const Arena = memo(function Arena({ game, mode, onJoin, onClose, tableSize, onTableSize }: Props) {
   const { roster } = game;
   const alive = aliveSeats(roster).length;
   const lastRound = game.hand ? null : game.lastRound?.round ?? null;
@@ -69,6 +73,20 @@ export const Arena = memo(function Arena({ game, mode, onJoin, onClose }: Props)
       <footer className="arena-chrome arena-foot">
         {mode === 'lobby' ? (
           <>
+            <div className="table-size" role="radiogroup" aria-label="1卓の人数">
+              {TABLE_SIZES.map((t) => (
+                <button
+                  key={t}
+                  role="radio"
+                  aria-checked={t === tableSize}
+                  className={`table-size-opt${t === tableSize ? ' is-on' : ''}`}
+                  data-testid={`table-${t}`}
+                  onClick={() => t !== tableSize && onTableSize(t)}
+                >
+                  {TABLE_LABEL[t]}
+                </button>
+              ))}
+            </div>
             <p>
               あなたの席は <b>{seatName(roster.you)}</b>。最後の1人まで生き残れ。
             </p>

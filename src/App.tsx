@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { createSoundBus, registerAudioFiles } from './audio/soundBus';
 import { SOUND_FILES } from './audio/soundMap';
 import { GameController } from './game/controller';
-import type { GameState } from './logic/game';
+import { DEFAULT_TABLE_SIZE, TABLE_SIZES, type GameState, type TableSize } from './logic/game';
 import { Director } from './presentation/director';
 import { prefersReducedMotion, watchReducedMotion } from './presentation/motion';
 import { createStore, useStore, type PresentationState } from './presentation/store';
@@ -39,9 +39,32 @@ export function readSeedFromUrl(): number | null {
   return v !== null && /^\d+$/.test(v) ? Number(v) >>> 0 : null;
 }
 
-export function App({ seed: initialSeed }: { seed?: number }) {
+const TABLE_KEY = 'poker100.tableSize';
+
+/** ?table=6 in the URL, else the last choice on this device, else heads-up. */
+export function readTableSize(): TableSize {
+  const parse = (v: string | null) => TABLE_SIZES.find((t) => String(t) === v) ?? null;
+  const fromUrl = typeof location === 'undefined' ? null : parse(new URLSearchParams(location.search).get('table'));
+  if (fromUrl) return fromUrl;
+  try {
+    return parse(localStorage.getItem(TABLE_KEY)) ?? DEFAULT_TABLE_SIZE;
+  } catch {
+    return DEFAULT_TABLE_SIZE;
+  }
+}
+
+function saveTableSize(t: TableSize) {
+  try {
+    localStorage.setItem(TABLE_KEY, String(t));
+  } catch {
+    // Storage may be unavailable (private mode); the choice just isn't remembered.
+  }
+}
+
+export function App({ seed: initialSeed, tableSize: initialTable }: { seed?: number; tableSize?: TableSize }) {
   const [seed, setSeed] = useState(() => initialSeed ?? readSeedFromUrl() ?? randomSeed());
-  const controller = useMemo(() => new GameController(seed), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const [tableSize, setTableSize] = useState<TableSize>(() => initialTable ?? readTableSize());
+  const controller = useMemo(() => new GameController(seed, tableSize), []); // eslint-disable-line react-hooks/exhaustive-deps
   const store = useMemo(() => createStore<PresentationState>(initialPresentation(controller.getState())), [controller]);
   const sound = useMemo(() => {
     const bus = createSoundBus();
@@ -94,8 +117,17 @@ export function App({ seed: initialSeed }: { seed?: number }) {
   const restart = () => {
     const s = randomSeed();
     setSeed(s);
-    controller.reset(s);
+    controller.reset(s, tableSize);
   };
+  // Only offered in the lobby, before the first hand.
+  const changeTable = useCallback(
+    (t: TableSize) => {
+      setTableSize(t);
+      saveTableSize(t);
+      controller.reset(seed, t);
+    },
+    [controller, seed],
+  );
 
   return (
     <div className={`app${reduced ? ' is-reduced' : ''}`}>
@@ -124,6 +156,8 @@ export function App({ seed: initialSeed }: { seed?: number }) {
         mode={arena}
         onJoin={join}
         onClose={closeArena}
+        tableSize={tableSize}
+        onTableSize={changeTable}
       />
       </div>
       <footer className="seed">seed {seed}</footer>

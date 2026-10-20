@@ -5,7 +5,6 @@ import {
   legalActions,
   playerAct,
   startHand,
-  TABLE_SIZE,
   TOTAL_PLAYERS,
   type GameState,
 } from '../src/logic/game';
@@ -28,17 +27,34 @@ describe('rules', () => {
     }
   });
 
-  it('seats six players: you at seat 0 plus five from the 100', () => {
-    const g = createGame(1);
-    expect(g.seats).toHaveLength(TABLE_SIZE);
-    expect(g.seats.every(Boolean)).toBe(true);
-    expect(g.seats[0]!.seat).toBe(g.roster.you);
-    expect(new Set(g.seats.map((f) => f!.seat)).size).toBe(TABLE_SIZE);
+  it('heads-up by default; six-max on request; you at seat 0, the rest from the 100', () => {
+    expect(createGame(1).seats).toHaveLength(2);
+    for (const size of [2, 6] as const) {
+      const g = createGame(1, size);
+      expect(g.seats).toHaveLength(size);
+      expect(g.seats.every(Boolean)).toBe(true);
+      expect(g.seats[0]!.seat).toBe(g.roster.you);
+      expect(new Set(g.seats.map((f) => f!.seat)).size).toBe(size);
+    }
+  });
+
+  it('heads-up: the button posts the small blind and acts first preflop', () => {
+    for (let seed = 1; seed < 30; seed++) {
+      const s = startHand(createGame(seed, 2));
+      const log = s.hand?.log ?? s.lastLog;
+      const start = log[0]!;
+      if (start.t !== 'start') throw new Error('start first');
+      const sb = start.blinds.find((b) => b.kind === 'sb')!;
+      expect(sb.seat).toBe(start.button);
+      const first = log.find((e) => e.t === 'act');
+      if (first && first.t === 'act') expect(first.seat).toBe(start.button);
+      else expect(s.hand?.toAct).toBe(start.button);
+    }
   });
 
   it('startHand posts blinds, deals every seat and stops on your turn (or finishes the hand)', () => {
     for (let seed = 1; seed < 20; seed++) {
-      const s = startHand(createGame(seed));
+      const s = startHand(createGame(seed, seed % 2 ? 2 : 6));
       const start = (s.hand?.log ?? s.lastLog)[0]!;
       expect(start.t).toBe('start');
       if (start.t !== 'start') continue;
@@ -77,9 +93,9 @@ describe('rules', () => {
   });
 });
 
-describe('full games (random player policy)', () => {
+describe('full games (random player policy, both table sizes)', () => {
   const seeds = Array.from({ length: 12 }, (_, i) => i + 1);
-  const games = seeds.map((seed) => autoplay(seed));
+  const games = seeds.map((seed) => autoplay(seed, 300, undefined, seed % 2 ? 2 : 6));
 
   it('is reproducible from the seed and the actions', () => {
     expect(autoplay(12345, 60)).toEqual(autoplay(12345, 60));
@@ -127,7 +143,7 @@ describe('full games (random player policy)', () => {
   });
 
   it('every game eventually ends', () => {
-    for (const seed of seeds.slice(0, 6)) expect(autoplay(seed, 3000).at(-1)!.status).not.toBe('playing');
+    for (const seed of seeds.slice(0, 6)) expect(autoplay(seed, 3000, undefined, seed % 2 ? 2 : 6).at(-1)!.status).not.toBe('playing');
   });
 
   it('starts with 100 survivors', () => {
