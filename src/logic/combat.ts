@@ -6,16 +6,16 @@ import { HandCategory, type HandResult } from './handEvaluator';
  * harder without inflating stacks.
  */
 export const HAND_BONUS: Record<HandCategory, number> = {
-  [HandCategory.HighCard]: 0,
-  [HandCategory.OnePair]: 0,
-  [HandCategory.TwoPair]: 3,
-  [HandCategory.ThreeOfAKind]: 5,
-  [HandCategory.Straight]: 8,
-  [HandCategory.Flush]: 10,
-  [HandCategory.FullHouse]: 14,
-  [HandCategory.FourOfAKind]: 22,
-  [HandCategory.StraightFlush]: 32,
-  [HandCategory.RoyalFlush]: 50,
+  [HandCategory.HighCard]: 3,
+  [HandCategory.OnePair]: 5,
+  [HandCategory.TwoPair]: 8,
+  [HandCategory.ThreeOfAKind]: 12,
+  [HandCategory.Straight]: 16,
+  [HandCategory.Flush]: 18,
+  [HandCategory.FullHouse]: 24,
+  [HandCategory.FourOfAKind]: 35,
+  [HandCategory.StraightFlush]: 50,
+  [HandCategory.RoyalFlush]: 80,
 };
 
 /** 0 (weak) … 4 (legendary). Drives how loud the presentation is. */
